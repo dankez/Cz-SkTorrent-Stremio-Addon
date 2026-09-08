@@ -59,6 +59,16 @@ const cache = new Map();
 // sa nesmú cachovať na plnú TTL — inak by výpadok trval hodiny.
 const PRAZDNY_TTL_MS = 60 * 1000; // 60s
 
+// ===================================================================
+// PRECACHE ĎALŠEJ EPIZÓDY (inšpirácia: AIOStreams "Pre-cache Next Episode")
+// ===================================================================
+// Anti-spam: rovnakú nasledujúcu epizódu (user + seriál + sezóna + ep) nechceme
+// pre-cacheovať častejšie ako raz za 30 min. Mapa je in-memory (zmizne s reštartom).
+const precacheCasovac = new Map();
+const PRECACHE_MIN_INTERVAL_MS = 30 * 60 * 1000; // 30 min
+// Mapa hash torrentu → pôvodné stream ID (pre trigger z /play, ktorý pozná len hash + S:E)
+const precacheIdMap = new Map();
+
 function jePrazdnyVysledok(data) {
     if (data === null || data === undefined) return true;
     if (Array.isArray(data)) return data.length === 0;
@@ -1360,6 +1370,58 @@ function maskConfigVUrl(url) {
 // (Stremio by to videl ako timeout a retry-oval). Tento wrapper pošle chybu do error middlewaru.
 const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// ── PRECACHE ĎALŠEJ EPIZÓDY — trigger z /play (reálne začaté prehrávanie) ──
+// Keď Stremio začne prehrávať CACHED epizódu (⚡), stiahne si jej /play URL.
+// To je signál, že user naozaj pozerá — vtedy na pozadí pošleme interný request
+// na streamy NASLEDUJÚCEJ epizódy (?precache=1), kde sa rozhodne, či treba
+// začať sťahovať torrent do debridu (rovnaká cesta ako klik na ⏳ stream).
+// Pôvodné ID seriálu poznáme cez precacheIdMap (hash → ID z posledného
+// vyhľadávania). Rekurzia je ošetrená: request s precache=1 už nič nespúšťa.
+function spustitPrecacheDalsejEpizody(userConfig, debridProvider, debridApiKey, hash, seria, epizoda, configSegment) {
+    try {
+        if (!userConfig || userConfig.precacheNextEpisode !== true || !debridProvider || !debridApiKey) return;
+        const s = parseInt(seria, 10);
+        const e = parseInt(epizoda, 10);
+        if (!(s > 0) || !(e > 0)) return; // filmy (0:0) a specialy (S0) preskakujeme
+        const povodneId = precacheIdMap.get(String(hash || '').toLowerCase());
+        if (!povodneId || !/:\d+:\d+$/.test(povodneId)) {
+            logInfo(`[PRECACHE] S${s}E${e}: preskočené (hash ${String(hash).slice(0, 12)}... nemáme ID, streamy sa možno hľadali pred reštartom)`);
+            return;
+        }
+        const dalsiaEpizoda = e + 1;
+        const showCast = povodneId.replace(/:\d+:\d+$/, '');
+        const nextId = `${showCast}:${s}:${dalsiaEpizoda}`;
+        const userKey = crypto.createHash('sha1').update(String(userConfig.user_id || userConfig.uid || '')).digest('hex').slice(0, 8);
+        const precacheKluč = `${userKey}|${showCast}|${s}|${dalsiaEpizoda}`;
+        const naposledy = precacheCasovac.get(precacheKluč) || 0;
+        if (Date.now() - naposledy > PRECACHE_MIN_INTERVAL_MS) {
+            precacheCasovac.set(precacheKluč, Date.now());
+            // Občasné upratovanie mapy, nech nerastie donekonečna
+            if (precacheCasovac.size > 200) {
+                for (const [k, v] of precacheCasovac) {
+                    if (Date.now() - v > PRECACHE_MIN_INTERVAL_MS * 2) precacheCasovac.delete(k);
+                }
+            }
+            logInfo(`[PRECACHE] S${s}E${e} sa začína prehrávať → S${s}E${dalsiaEpizoda} (${nextId}): spúšťam na pozadí`);
+            setImmediate(() => {
+                axios.get(`http://127.0.0.1:${PORT}/${configSegment}/stream/series/${nextId}.json?precache=1`, {
+                    timeout: 90000,
+                    validateStatus: () => true
+                }).then(r => {
+                    const pocet = (r.data && Array.isArray(r.data.streams)) ? r.data.streams.length : '?';
+                    logSuccess(`[PRECACHE] S${s}E${dalsiaEpizoda}: interný request hotový (HTTP ${r.status}, ${pocet} streamov)`);
+                }).catch(e => {
+                    logWarn(`[PRECACHE] S${s}E${dalsiaEpizoda}: interný request zlyhal: ${e.message}`);
+                });
+            });
+        } else {
+            logInfo(`[PRECACHE] S${s}E${dalsiaEpizoda}: preskočené (pre-cache bežal pred menej ako 30 min)`);
+        }
+    } catch (chyba) {
+        logWarn(`[PRECACHE] trigger zlyhal: ${chyba.message}`);
+    }
+}
+
 app.use((req, res, next) => {
     // Referer nesmie uniknút na CDN/debrid — URL obsahuje base64 config s
     // uid/pass/debrid kľúčmi usera. Bez tejto hlavičky by CDN videlo kľúče
@@ -1679,6 +1741,11 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     <span class="label-text" data-i18n="checkbox.cached">Cached Only</span>
                     <span class="label-desc" data-i18n="checkbox.cached.desc">Len cachované streamy</span>
                 </div>
+                <div class="checkbox-row" onclick="toggleCheckbox('precacheNextEpisode', event)">
+                    <input type="checkbox" id="precacheNextEpisode" ${getCheck('precacheNextEpisode', false)}>
+                    <span class="label-text" data-i18n="checkbox.precache">Pre-cache ďalšej epizódy</span>
+                    <span class="label-desc" data-i18n="checkbox.precache.desc">Seriály: na pozadí začať sťahovať ďalšiu epizódu</span>
+                </div>
                 <div style="padding: 8px 20px 4px;"><label style="font-size:12px;font-weight:600;color:#aaa;" data-i18n="label.videoQuality">Kvalita videa</label></div>
                 <div class="chip-group" id="hdrChips" style="padding-bottom:12px;">
                     <span class="chip ${hasArrVal('hdr','hdr',true)}" data-hdr="hdr" onclick="toggleChip(this)">HDR</span>
@@ -1828,6 +1895,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.filters': 'Obmedz kvalitu, veľkosť a počet výsledkov',
                     'checkbox.cached': 'Cached Only',
                     'checkbox.cached.desc': 'Len cachované streamy',
+                    'checkbox.precache': 'Pre-cache ďalšej epizódy',
+                    'checkbox.precache.desc': 'Seriály: po otvorení epizódy začni na pozadí sťahovať ďalšiu (ak nie je cached)',
                     'label.videoQuality': 'Kvalita videa',
                     'label.filter18': '18+ filter',
                     'chip.hide18': 'Skryť 18+ obsah',
@@ -1911,6 +1980,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.filters': 'Limit quality, size, and number of results',
                     'checkbox.cached': 'Cached Only',
                     'checkbox.cached.desc': 'Cached streams only',
+                    'checkbox.precache': 'Pre-cache next episode',
+                    'checkbox.precache.desc': 'Series: when opening an episode, start downloading the next one in background (if not cached)',
                     'label.videoQuality': 'Video quality',
                     'label.filter18': '18+ filter',
                     'chip.hide18': 'Hide 18+ content',
@@ -2134,6 +2205,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     lang: getActiveChips('#langChips .chip'),
                     show: getActiveChips('#showChips .chip'),
                     cachedOnly: document.getElementById('cachedOnly').checked,
+                    precacheNextEpisode: document.getElementById('precacheNextEpisode').checked,
                     hdr: getActiveChips('#hdrChips .chip'),
                     adult: getActiveChips('#adultChips .chip'),
                     source: getActiveChips('#sourceChips .chip'),
@@ -2619,6 +2691,10 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
 
             streamy = streamy.map(stream => {
                 const hash = stream.infoHash.toLowerCase();
+                if (!precacheIdMap.has(hash)) {
+                    precacheIdMap.set(hash, id); // hash → pôvodné stream ID (pre pre-cache z /play)
+                    if (precacheIdMap.size > 3000) precacheIdMap.delete(precacheIdMap.keys().next().value);
+                }
                 const jeCached = debridCache[hash] === true;
                 const jeRdBlocked = stream._sortRdBlocked === 1;
                 const staraKategoria = stream.name.split("\n")[1] || "";
@@ -2833,6 +2909,35 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
             streamy = result;
         }
 
+        // ── PRECACHE ĎALŠEJ EPIZÓDY: rozhodovanie pre vnútorný request ──
+        // Trigger NIE JE tu (pri prehliadaní streamov), ale v /play handleri:
+        // pre-cache sa spúšťa až keď sa epizóda reálne začne prehrávať.
+        // Tento blok beží len pri internom requeste s ?precache=1 a rozhodne,
+        // či treba začať sťahovať najlepší uncached torrent do debridu.
+        if (req.query.precache === '1' && seria !== undefined && epizoda !== undefined && debridProvider && debridApiKey && streamy.length > 0) {
+            if (streamy.some(s => s._sortCached === 1)) {
+                logInfo(`[PRECACHE] S${seria}E${epizoda}: netreba sťahovať — cached stream už existuje`);
+            } else {
+                // Žiadna cached verzia — vyberieme najlepší uncached podľa user sort.
+                // Pre Real-Debrid preskakujeme názvy, ktoré RD blokuje (451). Ak sú
+                // blokované všetky, kandidat = undefined → nič sa nesťahuje (fallback
+                // by stiahol torrent, ktorý RD aj tak odmietne).
+                const kandidat = streamy.find(s => s._sortCached === 0 && !(debridProvider === 'realdebrid' && s._sortRdBlocked === 1));
+                if (kandidat && kandidat.url) {
+                    const nazovKandidata = (kandidat.title || '').split('\n')[0] || 'neznámy';
+                    logInfo(`[PRECACHE] S${seria}E${epizoda}: žiadny cached stream, sťahujem najlepší uncached: ${nazovKandidata}`);
+                    // Klik na ⏳ stream by zavolal kandidat.url (cez PUBLIC_URL).
+                    // Interne ho smerujeme na loopback, nech request nejde cez tunel.
+                    const lokalnaUrl = kandidat.url.replace(PUBLIC_URL, `http://127.0.0.1:${PORT}`);
+                    axios.get(lokalnaUrl, { timeout: 30000, maxRedirects: 0, validateStatus: () => true })
+                        .then(() => logSuccess(`[PRECACHE] S${seria}E${epizoda}: /download vybavené`))
+                        .catch(e => logInfo(`[PRECACHE] S${seria}E${epizoda}: /download = ${e.message}`));
+                } else {
+                    logInfo(`[PRECACHE] S${seria}E${epizoda}: uncached streamy sú, ale žiadny vhodný kandidát`);
+                }
+            }
+        }
+
         // Odstrániť interné _sort polia
         streamy = streamy.map(({ _sortCached, _sortRdBlocked, _sortDub, _sortDubLang, _sortName, _sortCategory, _sortZaner, _sortHdr, _sortSource, _sortQuality, _sortSize, _sortSeeds, ...rest }) => rest);
 
@@ -2873,6 +2978,10 @@ app.get('/:config/play/:hash/:seria/:epizoda/:fileName', asyncRoute(async (req, 
     if (!debridApiKey) {
         return res.status(400).send("Chýba debrid API kľúč.");
     }
+
+    // PRECACHE ĎALŠEJ EPIZÓDY — /play znamená, že sa epizóda reálne začala
+    // prehrávať (cached ⚡ stream). Naplánujeme pre-cache nasledujúcej epizódy.
+    spustitPrecacheDalsejEpizody(userConfig, debridProvider, debridApiKey, hash, seria, epizoda, config);
 
     if (debridProvider === 'torbox') {
         return handleTorboxPlay(req, res, hash, seria, epizoda, decodedFileName, userConfig, debridApiKey);
