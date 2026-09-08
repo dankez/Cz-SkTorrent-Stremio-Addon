@@ -1736,13 +1736,13 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 <div class="section-header"><span class="icon">🎚️</span> <span data-i18n="section.filters">Quality &amp; Filters</span></div>
                 <div class="section-desc" data-i18n="desc.filters">Obmedz kvalitu, veľkosť a počet výsledkov</div>
 
-                <div class="checkbox-row" onclick="toggleCheckbox('cachedOnly', event)">
+                <div class="checkbox-row" id="cachedOnlyRow" onclick="toggleCheckbox('cachedOnly', event)">
                     <input type="checkbox" id="cachedOnly" onchange="aktualizujCachedOnlyWarning()" ${getCheck('cachedOnly', false)}>
                     <span class="label-text" data-i18n="checkbox.cached">Cached Only</span>
                     <span class="label-desc" data-i18n="checkbox.cached.desc">Len cachované streamy</span>
                 </div>
                 <div id="cachedOnlyRdWarning" style="display:none;margin:-2px 20px 12px;padding:8px 12px;background:rgba(255,183,77,0.1);border:1px solid rgba(255,183,77,0.35);border-radius:8px;font-size:12px;line-height:1.5;color:#ffb74d;" data-i18n="checkbox.cached.rdWarning">⚠️ Pri Real-Debrid je Cached Only nespoľahlivé: RD nemá API na kontrolu cache. ⚡ označuje len torrenty, ktoré už stiahol niekto cez tento addon, filter môže skryť hrateľné streamy.</div>
-                <div class="checkbox-row" onclick="toggleCheckbox('precacheNextEpisode', event)">
+                <div class="checkbox-row" id="precacheRow" onclick="toggleCheckbox('precacheNextEpisode', event)">
                     <input type="checkbox" id="precacheNextEpisode" ${getCheck('precacheNextEpisode', false)}>
                     <span class="label-text" data-i18n="checkbox.precache">Pre-cache ďalšej epizódy</span>
                     <span class="label-desc" data-i18n="checkbox.precache.desc">Seriály: na pozadí začať sťahovať ďalšiu epizódu</span>
@@ -2207,18 +2207,20 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     uidVal = document.getElementById('manualUid').value;
                     passVal = document.getElementById('manualPass').value;
                 }
+                var debridProvider = document.getElementById('debridProvider').value;
+                var jeDebridMod = debridProvider === 'torbox' || debridProvider === 'realdebrid';
                 var config = {
                     uid: uidVal,
                     pass: passVal,
-                    debridProvider: document.getElementById('debridProvider').value,
+                    debridProvider: debridProvider,
                     torbox: document.getElementById('torbox').value,
                     realdebrid: document.getElementById('realdebrid').value,
                     tmdb: document.getElementById('tmdb').value,
                     tvdb: document.getElementById('tvdb').value,
                     lang: getActiveChips('#langChips .chip'),
                     show: getActiveChips('#showChips .chip'),
-                    cachedOnly: document.getElementById('cachedOnly').checked,
-                    precacheNextEpisode: document.getElementById('precacheNextEpisode').checked,
+                    cachedOnly: jeDebridMod && document.getElementById('cachedOnly').checked,
+                    precacheNextEpisode: jeDebridMod && document.getElementById('precacheNextEpisode').checked,
                     hdr: getActiveChips('#hdrChips .chip'),
                     adult: getActiveChips('#adultChips .chip'),
                     source: getActiveChips('#sourceChips .chip'),
@@ -2230,8 +2232,6 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     sort: getSortValues(),
                     cb: Date.now()
                 };
-
-                var debridProvider = document.getElementById('debridProvider').value;
 
                 if ((!config.uid || !config.pass) && (!debridProvider || debridProvider === 'p2p')) {
                     alert(t('alert.fillUidPass'));
@@ -2290,15 +2290,49 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 var torboxField = document.getElementById('torboxField');
                 var realdebridField = document.getElementById('realdebridField');
                 var sktorrentSection = document.getElementById('sktorrentSection');
-                
+                var debridMod = provider === 'torbox' || provider === 'realdebrid';
+
                 // Debrid API fields
                 if (torboxField) torboxField.style.display = (provider === 'torbox') ? '' : 'none';
                 if (realdebridField) realdebridField.style.display = (provider === 'realdebrid') ? '' : 'none';
-                
+
                 // SKTorrent login: vždy viditeľný (zrýchli vyhľadávanie v každom móde)
                 if (sktorrentSection) sktorrentSection.style.display = 'block';
 
+                // Cached Only aj Pre-cache dávajú zmysel len s debrid službou (P2P nemá cache)
+                var cachedRow = document.getElementById('cachedOnlyRow');
+                var precacheRow = document.getElementById('precacheRow');
+                if (cachedRow) cachedRow.style.display = debridMod ? '' : 'none';
+                if (precacheRow) precacheRow.style.display = debridMod ? '' : 'none';
+
+                // Sortovanie podľa Cached tiež len v debrid móde
+                upravitSortPreProvider();
                 aktualizujCachedOnlyWarning();
+            }
+
+            function upravitSortPreProvider() {
+                var providerSel = document.getElementById('debridProvider');
+                var container = document.getElementById('sortOrders');
+                if (!providerSel || !container) return;
+                var debridMod = providerSel.value === 'torbox' || providerSel.value === 'realdebrid';
+                var vals = [], act = [];
+                var rows = container.querySelectorAll('.sort-row');
+                for (var i = 0; i < rows.length; i++) {
+                    vals.push(rows[i].dataset.value);
+                    act.push(rows[i].dataset.active !== 'false');
+                }
+                var idx = vals.indexOf('cached');
+                if (debridMod && idx === -1) {
+                    // Debrid: Cached vrátime na prvú pozíciu (predvolené poradie)
+                    vals.unshift('cached');
+                    act.unshift(true);
+                    initSortRows(vals, act);
+                } else if (!debridMod && idx !== -1) {
+                    // P2P / žiadna služba: Cached nemá zmysel, odstránime
+                    vals.splice(idx, 1);
+                    act.splice(idx, 1);
+                    initSortRows(vals, act);
+                }
             }
 
             function toggleManualFields(e) {
