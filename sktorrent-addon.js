@@ -1737,10 +1737,11 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 <div class="section-desc" data-i18n="desc.filters">Obmedz kvalitu, veľkosť a počet výsledkov</div>
 
                 <div class="checkbox-row" onclick="toggleCheckbox('cachedOnly', event)">
-                    <input type="checkbox" id="cachedOnly" ${getCheck('cachedOnly', false)}>
+                    <input type="checkbox" id="cachedOnly" onchange="aktualizujCachedOnlyWarning()" ${getCheck('cachedOnly', false)}>
                     <span class="label-text" data-i18n="checkbox.cached">Cached Only</span>
                     <span class="label-desc" data-i18n="checkbox.cached.desc">Len cachované streamy</span>
                 </div>
+                <div id="cachedOnlyRdWarning" style="display:none;margin:-2px 20px 12px;padding:8px 12px;background:rgba(255,183,77,0.1);border:1px solid rgba(255,183,77,0.35);border-radius:8px;font-size:12px;line-height:1.5;color:#ffb74d;" data-i18n="checkbox.cached.rdWarning">⚠️ Pri Real-Debrid je Cached Only nespoľahlivé: RD nemá API na kontrolu cache. ⚡ označuje len torrenty, ktoré už stiahol niekto cez tento addon, filter môže skryť hrateľné streamy.</div>
                 <div class="checkbox-row" onclick="toggleCheckbox('precacheNextEpisode', event)">
                     <input type="checkbox" id="precacheNextEpisode" ${getCheck('precacheNextEpisode', false)}>
                     <span class="label-text" data-i18n="checkbox.precache">Pre-cache ďalšej epizódy</span>
@@ -1895,6 +1896,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.filters': 'Obmedz kvalitu, veľkosť a počet výsledkov',
                     'checkbox.cached': 'Cached Only',
                     'checkbox.cached.desc': 'Len cachované streamy',
+                    'checkbox.cached.rdWarning': '⚠️ Pri Real-Debrid je Cached Only nespoľahlivé: RD nemá API na kontrolu cache. ⚡ označuje len torrenty, ktoré už stiahol niekto cez tento addon, filter môže skryť hrateľné streamy.',
                     'checkbox.precache': 'Pre-cache ďalšej epizódy',
                     'checkbox.precache.desc': 'Seriály: po otvorení epizódy začni na pozadí sťahovať ďalšiu (ak nie je cached)',
                     'label.videoQuality': 'Kvalita videa',
@@ -1980,6 +1982,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.filters': 'Limit quality, size, and number of results',
                     'checkbox.cached': 'Cached Only',
                     'checkbox.cached.desc': 'Cached streams only',
+                    'checkbox.cached.rdWarning': '⚠️ With Real-Debrid the Cached Only filter is unreliable: RD has no cache-check API, ⚡ only marks torrents already downloaded through this addon, so it may hide playable streams.',
                     'checkbox.precache': 'Pre-cache next episode',
                     'checkbox.precache.desc': 'Series: when opening an episode, start downloading the next one in background (if not cached)',
                     'label.videoQuality': 'Video quality',
@@ -2165,6 +2168,16 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 if (event && event.target && event.target.type === 'checkbox') return;
                 var cb = document.getElementById(id);
                 cb.checked = !cb.checked;
+                aktualizujCachedOnlyWarning();
+            }
+
+            function aktualizujCachedOnlyWarning() {
+                var warn = document.getElementById('cachedOnlyRdWarning');
+                if (!warn) return;
+                var providerSel = document.getElementById('debridProvider');
+                var cb = document.getElementById('cachedOnly');
+                var viditelne = providerSel && providerSel.value === 'realdebrid' && cb && cb.checked;
+                warn.style.display = viditelne ? '' : 'none';
             }
 
             function toggleSortActive(btn) {
@@ -2284,6 +2297,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 
                 // SKTorrent login: vždy viditeľný (zrýchli vyhľadávanie v každom móde)
                 if (sktorrentSection) sktorrentSection.style.display = 'block';
+
+                aktualizujCachedOnlyWarning();
             }
 
             function toggleManualFields(e) {
