@@ -2420,6 +2420,204 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
     res.send(html);
 });
 
+// ===================================================================
+// KATALÓGY (POPULÁRNE / TRENDING / NAJNOVŠIE Z SKTORRENT)
+// ===================================================================
+
+const SKT_CATALOGS = [
+    {
+        type: "movie",
+        id: "skt_movies_trending",
+        name: "SKTorrent - Dnes populárne",
+        category: 1,
+        order: "seeds",
+        active: 1
+    },
+    {
+        type: "movie",
+        id: "skt_movies_popular",
+        name: "SKTorrent - Najsťahovanejšie filmy",
+        category: 1,
+        order: "finished",
+        active: 0
+    },
+    {
+        type: "movie",
+        id: "skt_movies_new",
+        name: "SKTorrent - Najnovšie filmy",
+        category: 1,
+        order: "data",
+        active: 0
+    },
+    {
+        type: "series",
+        id: "skt_series_popular",
+        name: "SKTorrent - Najsťahovanejšie seriály",
+        category: 16,
+        order: "finished",
+        active: 0
+    },
+    {
+        type: "series",
+        id: "skt_series_new",
+        name: "SKTorrent - Najnovšie seriály",
+        category: 16,
+        order: "data",
+        active: 0
+    }
+];
+
+function cleanCatalogTitle(rawTitle, type) {
+    let t = String(rawTitle || "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad)/i, "");
+    t = t.replace(/\b(?:CZ\/SK|SK\/CZ|CZ\/EN|SK\/EN)\b/gi, "");
+    t = t.replace(/=\s*CSFD\s*\d+%/gi, "").trim();
+
+    let year = null;
+    const yearMatch = t.match(/\b(19\d\d|20\d\d)\b/);
+    if (yearMatch) year = yearMatch[1];
+
+    if (type === "series") {
+        t = t.replace(/\bS\d+E\d+\b/gi, "")
+             .replace(/\bS\d+\b/gi, "")
+             .replace(/\d+\.\s*(?:serie|séria|rada)\b/gi, "")
+             .replace(/\d+x\d+\b/gi, "")
+             .replace(/\d+\.\s*(?:díl|epizoda|epizóda)\b/gi, "");
+    }
+
+    t = t.replace(/\[.*?\]/g, " ").replace(/\(.*?\)/g, " ").trim();
+    t = t.replace(/\s+/g, " ");
+
+    const parts = t.split("/").map(p => p.trim()).filter(p => p.length >= 2);
+    return { parts, year, rawClean: parts[0] || t };
+}
+
+async function matchCinemetaForCatalog(titleObj, type) {
+    if (!titleObj || !titleObj.parts || titleObj.parts.length === 0) return null;
+
+    for (const part of titleObj.parts.slice().reverse()) {
+        const cacheKey = `cinemeta_cat_${type}:${part}`;
+        const match = await withCache(cacheKey, 86400000, async () => {
+            try {
+                const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(part)}.json`;
+                const res = await axios.get(url, {
+                    timeout: 3500,
+                    httpAgent: sharedHttpAgent,
+                    httpsAgent: sharedHttpsAgent,
+                    headers: { "User-Agent": "Stremio" }
+                });
+                const metas = res.data?.metas;
+                if (Array.isArray(metas) && metas.length > 0) {
+                    const first = metas[0];
+                    return {
+                        id: first.id,
+                        type: first.type || type,
+                        name: first.name,
+                        poster: first.poster,
+                        releaseInfo: first.releaseInfo || first.year || titleObj.year,
+                        description: first.description || "",
+                        imdbRating: first.imdbRating
+                    };
+                }
+            } catch (e) {
+                // ignore timeout/error
+            }
+            return null;
+        });
+        if (match) return match;
+    }
+    return null;
+}
+
+async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
+    const page = Math.floor(skip / 24);
+    const cacheKey = `catalog_${catalogDef.id}_page_${page}`;
+
+    return withCache(cacheKey, 1800000, async () => {
+        logApi(`Fetching catalog ${catalogDef.name} (Page ${page})...`);
+        try {
+            const res = await userAxios.get(SEARCH_URL, {
+                params: {
+                    category: catalogDef.category,
+                    order: catalogDef.order,
+                    by: 'DESC',
+                    page: page,
+                    active: catalogDef.active || 0
+                },
+                timeout: 8000
+            });
+
+            const $ = cheerio.load(res.data);
+            const rawItems = [];
+            const seenIds = new Set();
+            const seenSeriesTitles = new Set();
+
+            $('a[href^="details.php"] img').each((i, img) => {
+                const a = $(img).closest("a");
+                const href = a.attr("href") || "";
+                const torrentId = href.split("id=").pop();
+                if (!torrentId || seenIds.has(torrentId)) return;
+                seenIds.add(torrentId);
+
+                const rawTitle = a.attr("title") || a.text().trim() || "";
+                const poster = $(img).attr("data-src") || $(img).attr("src") || "";
+                const td = a.closest("td");
+                const text = td.text().replace(/\s+/g, " ").trim();
+                const velkostMatch = text.match(/Velkost\s([^|]+)/i);
+                const seedMatch = text.match(/Odosielaju\s*:\s*(\d+)/i);
+                const size = velkostMatch ? velkostMatch[1].trim() : "";
+                const seeds = seedMatch ? parseInt(seedMatch[1]) : 0;
+
+                const titleObj = cleanCatalogTitle(rawTitle, catalogDef.type);
+
+                if (catalogDef.type === "series") {
+                    const canonical = (titleObj.parts[0] || "").toLowerCase();
+                    if (canonical && seenSeriesTitles.has(canonical)) return;
+                    if (canonical) seenSeriesTitles.add(canonical);
+                }
+
+                rawItems.push({
+                    torrentId,
+                    rawTitle,
+                    poster,
+                    size,
+                    seeds,
+                    titleObj
+                });
+            });
+
+            logInfo(`Catalog ${catalogDef.id}: found ${rawItems.length} torrents, resolving Cinemeta...`);
+
+            const metas = [];
+            for (let i = 0; i < rawItems.length; i += 6) {
+                const chunk = rawItems.slice(i, i + 6);
+                const chunkMetas = await Promise.all(chunk.map(async (item) => {
+                    const matched = await matchCinemetaForCatalog(item.titleObj, catalogDef.type);
+                    if (matched) {
+                        return matched;
+                    }
+                    return {
+                        id: `skt:${item.torrentId}`,
+                        type: catalogDef.type,
+                        name: item.titleObj.rawClean || item.rawTitle,
+                        poster: item.poster || `${PUBLIC_URL}/logo.png`,
+                        releaseInfo: item.titleObj.year || undefined,
+                        description: `SKTorrent | ${item.size} | Seeders: ${item.seeds}`
+                    };
+                }));
+                metas.push(...chunkMetas.filter(Boolean));
+            }
+
+            logSuccess(`Catalog ${catalogDef.id}: ready with ${metas.length} items`);
+            return metas;
+        } catch (err) {
+            logError(`Failed to fetch catalog ${catalogDef.id}`, err);
+            return [];
+        }
+    });
+}
+
 // --- Manifest Route ---
 const handleManifest = (req, res) => {
     res.set({
@@ -2431,15 +2629,20 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.0.1",
+        version: "2.1.0",
         name: "TorrentSK",
-        description: "SKTorrent s TorBox prehrávaním, ČSFD a metadátami",
+        description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
         icon: `${PUBLIC_URL}/logo.png`,
         types: ["movie", "series"],
-        catalogs: [],
-        resources: ["stream"],
-        idPrefixes: ["tt", "tvdb-", "tvdb:", "tmdb:"],
+        catalogs: SKT_CATALOGS.map(c => ({
+            type: c.type,
+            id: c.id,
+            name: c.name,
+            extra: [{ name: "skip", isRequired: false }]
+        })),
+        resources: ["stream", "catalog", "meta"],
+        idPrefixes: ["tt", "tvdb-", "tvdb:", "tmdb:", "skt:"],
         behaviorHints: {
             configurable: true,
             configurationRequired: false
@@ -2450,9 +2653,54 @@ const handleManifest = (req, res) => {
 app.get('/manifest.json', handleManifest);
 app.get('/:config/manifest.json', handleManifest);
 
-app.get('/:config?/catalog/:type/:id.json', (req, res) => {
-    res.json({ metas: [] });
-});
+app.get([
+    '/catalog/:type/:id.json',
+    '/catalog/:type/:id/:extra.json',
+    '/:config/catalog/:type/:id.json',
+    '/:config/catalog/:type/:id/:extra.json'
+], asyncRoute(async (req, res) => {
+    const { type, id, config, extra } = req.params;
+    const catalogDef = SKT_CATALOGS.find(c => c.id === id && c.type === type);
+    if (!catalogDef) {
+        return res.json({ metas: [] });
+    }
+
+    let skip = 0;
+    if (extra) {
+        const skipMatch = extra.match(/skip=(\d+)/);
+        if (skipMatch) skip = parseInt(skipMatch[1], 10);
+    }
+    if (req.query.skip) {
+        skip = parseInt(req.query.skip, 10) || skip;
+    }
+
+    const userConfig = config ? decodeConfig(config) : {};
+    const userAxios = getFastAxios(userConfig || {});
+
+    const metas = await fetchSkTorrentCatalog(catalogDef, skip, userAxios);
+    res.setHeader('Cache-Control', 'max-age=1800, stale-while-revalidate=1800');
+    return res.json({ metas: metas || [] });
+}));
+
+app.get([
+    '/meta/:type/:id.json',
+    '/:config/meta/:type/:id.json'
+], asyncRoute(async (req, res) => {
+    const { type, id } = req.params;
+    if (id && id.startsWith('skt:')) {
+        const torrentId = id.replace(/^skt:/, '');
+        const meta = {
+            id,
+            type: type || "movie",
+            name: "SKTorrent Titul",
+            poster: `https://cdn.sktorrent.eu/obrazky/${torrentId}.jpg`,
+            background: `${PUBLIC_URL}/logo.png`,
+            description: "Prehrávanie cez SKTorrent doplnok"
+        };
+        return res.json({ meta });
+    }
+    return res.status(404).json({ err: "Not found" });
+}));
 
 // --- Stream Route ---
 app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
@@ -2535,12 +2783,21 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
     //   tvdb:466037:1:1     (series, TVDB addon)
     //   tvdb-466037:1:1     (series, TVDB addon variant)
     //   tvdb:466037:official:1:1  (series, TVDB addon — oficiálny formát s 'official')
+    //   skt:hash:1:1        (direct SKTorrent item)
+    const sktMatch = id.match(/^skt:([a-f0-9]+)(?::(\d+):(\d+))?$/i);
     const imdbMatch = id.match(/^(tt\d+)(?::(\d+):(\d+))?$/);
     const tmdbMatch = id.match(/^tmdb:(\d+)(?::(\d+):(\d+))?$/);
     const tvdbMatch = id.match(/^tvdb[-: ]?(\d+)(?::official)?(?::(\d+):(\d+))?$/);
 
     let rawId, seria, epizoda, vlastnyTyp;
-    if (imdbMatch) {
+    let sktDirectId = null;
+    if (sktMatch) {
+        sktDirectId = sktMatch[1];
+        rawId = `skt:${sktDirectId}`;
+        seria = sktMatch[2] ? parseInt(sktMatch[2]) : undefined;
+        epizoda = sktMatch[3] ? parseInt(sktMatch[3]) : undefined;
+        vlastnyTyp = sktMatch[2] ? "series" : "movie";
+    } else if (imdbMatch) {
         rawId = imdbMatch[1];
         seria = imdbMatch[2] ? parseInt(imdbMatch[2]) : undefined;
         epizoda = imdbMatch[3] ? parseInt(imdbMatch[3]) : undefined;
@@ -2646,69 +2903,79 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
         }
     };
 
-    // ── BATCH 1: CSFD URL + primárny názov (max 2 query, paralelne) ──
-    // SKTorrent search je čistý substring search — primárny názov (bez diakritiky)
-    // nájde pack aj epizódy, správnu epizódu vyberie client-side filter.
-    const primarnyBezDia = odstranDiakritiku(unikatneNazvy[0] || "").trim();
-    const prveDotazy = [];
-    if (csfdLink) prveDotazy.push(csfdLink);
-    if (primarnyBezDia) prveDotazy.push(primarnyBezDia);
-
-    const vysledkyBatch = await Promise.all(prveDotazy.map(d =>
-        hladatTorrenty(d, userAxios, 2, userKey)
-    ));
-    prveDotazy.forEach((d, i) => spracujVysledky(d, vysledkyBatch[i] || []));
-
-    // ── FALLBACK: len ak batch 1 nič nenašiel ──
-    // Kratšie názvy (3 slová) a ostatné jazykové varianty — ale NIE epizódové tagy
-    // (sú vždy podmnožina základného názvu) a nie generické jednoslovné query
-    // (vracajú garbage — napr. "Odysea" → 36 irelevantných torrentov).
-    if (torrenty.length === 0) {
-        const fallback = [];
-        unikatneNazvy.forEach(z => {
-            const bezDia = odstranDiakritiku(z).trim();
-            if (!bezDia || bezDia === primarnyBezDia) return;
-            fallback.push(bezDia);
-            const kratky = skratNazov(bezDia, 3);
-            if (kratky && kratky !== bezDia) fallback.push(kratky);
+    if (sktDirectId) {
+        logInfo(`Direct SKT stream lookup for ID: ${sktDirectId}`);
+        torrenty.push({
+            name: "SKTorrent",
+            id: sktDirectId,
+            downloadUrl: `${BASE_URL}/torrent/download.php?id=${sktDirectId}`
         });
-        // kratší variant primárneho názvu ako prvý (ak je dlhý)
-        const primKratky = skratNazov(primarnyBezDia, 3);
-        if (primKratky && primKratky !== primarnyBezDia) fallback.unshift(primKratky);
+        videnieTorrentIds.add(sktDirectId);
+    } else {
+        // ── BATCH 1: CSFD URL + primárny názov (max 2 query, paralelne) ──
+        // SKTorrent search je čistý substring search — primárny názov (bez diakritiky)
+        // nájde pack aj epizódy, správnu epizódu vyberie client-side filter.
+        const primarnyBezDia = odstranDiakritiku(unikatneNazvy[0] || "").trim();
+        const prveDotazy = [];
+        if (csfdLink) prveDotazy.push(csfdLink);
+        if (primarnyBezDia) prveDotazy.push(primarnyBezDia);
 
-        const unikFallback = [...new Set(fallback)].slice(0, 4); // max 4, nech nepreťažíme tracker
-        const vysledkyFb = await Promise.all(unikFallback.map(d =>
+        const vysledkyBatch = await Promise.all(prveDotazy.map(d =>
             hladatTorrenty(d, userAxios, 2, userKey)
         ));
-        unikFallback.forEach((d, i) => spracujVysledky(d, vysledkyFb[i] || []));
-    }
+        prveDotazy.forEach((d, i) => spracujVysledky(d, vysledkyBatch[i] || []));
 
-    // Name filter preskočíme LEN ak CSFD query reálne našla torrenty (sú to presné
-    // zhody). Ak CSFD link existuje ale query nič nevrátila, filter beží — inak by
-    // cez generické fallback query prešiel garbage (iné filmy s podobným názvom).
-    if (!uspesneNajdeneCezCsfd) {
-        const predNameFiltrom = torrenty.length;
-        torrenty = torrenty.filter(t => {
-            let rawName = odstranDiakritiku(t.name.toLowerCase()).replace(/^stiahni si\s*/i, "").trim();
-            const prefixRe = /^(?:filmy|film|serialy|serial|seriál|seria|serie|dokumenty|dokument|tv|kreslene|kreslené|anime)\b/i;
-            const junkRe = /^(?:\s+|[-–_|/]+|\[[^\]]*]|\([^)]+\)|1080p|720p|2160p|4k|hdr|web[-\s]?dl|webrip|brrip|bluray|dvdrip|tvrip|cz|sk|en)\b/i;
-            
-            let prev;
-            do {
-                prev = rawName;
-                rawName = rawName.replace(prefixRe, "").trim();
-                rawName = rawName.replace(junkRe, "").trim();
-            } while (rawName !== prev);
+        // ── FALLBACK: len ak batch 1 nič nenašiel ──
+        // Kratšie názvy (3 slová) a ostatné jazykové varianty — ale NIE epizódové tagy
+        // (sú vždy podmnožina základného názvu) a nie generické jednoslovné query
+        // (vracajú garbage — napr. "Odysea" → 36 irelevantných torrentov).
+        if (torrenty.length === 0) {
+            const fallback = [];
+            unikatneNazvy.forEach(z => {
+                const bezDia = odstranDiakritiku(z).trim();
+                if (!bezDia || bezDia === primarnyBezDia) return;
+                fallback.push(bezDia);
+                const kratky = skratNazov(bezDia, 3);
+                if (kratky && kratky !== bezDia) fallback.push(kratky);
+            });
+            // kratší variant primárneho názvu ako prvý (ak je dlhý)
+            const primKratky = skratNazov(primarnyBezDia, 3);
+            if (primKratky && primKratky !== primarnyBezDia) fallback.unshift(primKratky);
 
-            for (const nazov of unikatneNazvy) {
-                const hl = odstranDiakritiku(nazov.toLowerCase()).trim();
-                if (!hl) continue;
-                const escaped = hl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-                if (new RegExp(`\\b${escaped}\\b`, "i").test(rawName)) return true;
-            }
-            return false;
-        });
-        logInfo(`Title accuracy filter complete. Remaining: ${torrenty.length} (filtered out ${predNameFiltrom - torrenty.length} unrelated titles)`);
+            const unikFallback = [...new Set(fallback)].slice(0, 4); // max 4, nech nepreťažíme tracker
+            const vysledkyFb = await Promise.all(unikFallback.map(d =>
+                hladatTorrenty(d, userAxios, 2, userKey)
+            ));
+            unikFallback.forEach((d, i) => spracujVysledky(d, vysledkyFb[i] || []));
+        }
+
+        // Name filter preskočíme LEN ak CSFD query reálne našla torrenty (sú to presné
+        // zhody). Ak CSFD link existuje ale query nič nevrátila, filter beží — inak by
+        // cez generické fallback query prešiel garbage (iné filmy s podobným názvom).
+        if (!uspesneNajdeneCezCsfd) {
+            const predNameFiltrom = torrenty.length;
+            torrenty = torrenty.filter(t => {
+                let rawName = odstranDiakritiku(t.name.toLowerCase()).replace(/^stiahni si\s*/i, "").trim();
+                const prefixRe = /^(?:filmy|film|serialy|serial|seriál|seria|serie|dokumenty|dokument|tv|kreslene|kreslené|anime)\b/i;
+                const junkRe = /^(?:\s+|[-–_|/]+|\[[^\]]*]|\([^)]+\)|1080p|720p|2160p|4k|hdr|web[-\s]?dl|webrip|brrip|bluray|dvdrip|tvrip|cz|sk|en)\b/i;
+                
+                let prev;
+                do {
+                    prev = rawName;
+                    rawName = rawName.replace(prefixRe, "").trim();
+                    rawName = rawName.replace(junkRe, "").trim();
+                } while (rawName !== prev);
+
+                for (const nazov of unikatneNazvy) {
+                    const hl = odstranDiakritiku(nazov.toLowerCase()).trim();
+                    if (!hl) continue;
+                    const escaped = hl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                    if (new RegExp(`\\b${escaped}\\b`, "i").test(rawName)) return true;
+                }
+                return false;
+            });
+            logInfo(`Title accuracy filter complete. Remaining: ${torrenty.length} (filtered out ${predNameFiltrom - torrenty.length} unrelated titles)`);
+        }
     }
 
     if (seria !== undefined) {
