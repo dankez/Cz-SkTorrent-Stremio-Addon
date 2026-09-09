@@ -1013,7 +1013,8 @@ async function hladatTorrenty(dotaz, userAxios, maxPages = 1, userKey = "") {
                     });
 
                     if (!kategoria.toLowerCase().includes("film") && !kategoria.toLowerCase().includes("seri") &&
-                        !kategoria.toLowerCase().includes("dokum") && !kategoria.toLowerCase().includes("tv")) return;
+                        !kategoria.toLowerCase().includes("dokum") && !kategoria.toLowerCase().includes("tv") &&
+                        !kategoria.toLowerCase().includes("sport") && !kategoria.toLowerCase().includes("šport")) return;
 
                     videnieIds.add(torrentId);
                     vsetkyVysledky.push({
@@ -1037,7 +1038,7 @@ async function hladatTorrenty(dotaz, userAxios, maxPages = 1, userKey = "") {
                 }
 
             } catch (chyba) {
-                logError(`SKTorrent search failed on page ${page} for: "${dotaz}"`, chyba);
+                logError(`Search request failed for page ${page}`, chyba);
                 break;
             }
         }
@@ -1046,6 +1047,29 @@ async function hladatTorrenty(dotaz, userAxios, maxPages = 1, userKey = "") {
     });
 }
 
+function torrentValueToString(value) {
+    if (!value) return null;
+    if (Buffer.isBuffer(value)) return value.toString();
+    if (typeof value === "string") return value;
+    return String(value);
+}
+
+function extractTorrentTrackers(torrent) {
+    const trackers = [];
+    const addTracker = (value) => {
+        const tracker = torrentValueToString(value);
+        if (tracker && /^(https?|udp):\/\//i.test(tracker)) trackers.push(`tracker:${tracker}`);
+    };
+
+    addTracker(torrent.announce);
+
+    const announceList = torrent["announce-list"];
+    if (Array.isArray(announceList)) {
+        announceList.flat(Infinity).forEach(addTracker);
+    }
+
+    return [...new Set(trackers)];
+}
 
 async function stiahnutTorrentData(url, userAxios) {
     return withCache(`torrent:${url}`, 86400000, async () => { 
@@ -1061,6 +1085,7 @@ async function stiahnutTorrentData(url, userAxios) {
             const torrent = bencode.decode(res.data);
             const info = bencode.encode(torrent.info);
             const infoHash = crypto.createHash("sha1").update(info).digest("hex");
+            const trackers = extractTorrentTrackers(torrent);
 
             let subory = [];
             if (torrent.info.files) {
@@ -1075,8 +1100,8 @@ async function stiahnutTorrentData(url, userAxios) {
                 subory = [{ path: nazov, index: 0, length }];
             }
 
-            logSuccess(`Successfully parsed .torrent (Hash: ${infoHash}) from ${url}`);
-            return { infoHash, files: subory };
+            logSuccess(`Successfully parsed .torrent (Hash: ${infoHash}, Trackers: ${trackers.length}) from ${url}`);
+            return { infoHash, files: subory, trackers };
         } catch (chyba) {
             logError(`Failed to download/parse .torrent from ${url}`, chyba);
             return null;
@@ -1336,6 +1361,7 @@ if (videoSubory.length === 1) {
         fileName: cistyNazovSuboru,
         infoHash: torrentData ? torrentData.infoHash : t.id,
         fileIdx: najdenyIndex === -1 ? 0 : najdenyIndex,
+        sources: (torrentData && torrentData.trackers) ? torrentData.trackers : [],
         isDub: jeSKCZ,
         seeds: t.seeds,
         _sortHdr: hdrTag,
@@ -2464,13 +2490,29 @@ const SKT_CATALOGS = [
         category: 16,
         order: "data",
         active: 0
+    },
+    {
+        type: "movie",
+        id: "skt_docs",
+        name: "SKTorrent - Dokumenty",
+        category: 17,
+        order: "data",
+        active: 0
+    },
+    {
+        type: "movie",
+        id: "skt_sport",
+        name: "SKTorrent - Šport",
+        category: 44,
+        order: "data",
+        active: 0
     }
 ];
 
 function cleanCatalogTitle(rawTitle, type) {
     let t = String(rawTitle || "");
-    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
-    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad)/i, "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)/i, "");
     t = t.replace(/\b(?:CZ\/SK|SK\/CZ|CZ\/EN|SK\/EN)\b/gi, "");
     t = t.replace(/=\s*CSFD\s*\d+%/gi, "").trim();
 
@@ -3070,11 +3112,21 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
             streamy = streamy.map(stream => {
                 const staraKategoria = stream.name.split("\n")[1] || "";
                 const sortText = `${staraKategoria} ${stream.title || ""}`;
+                const seeds = stream.seeds || 0;
+
+                let bufferHint = "";
+                if (seeds < 5) {
+                    bufferHint = "\n⚠️ Málo seedov — zapauzuj na 1-2 min na načítanie do cache";
+                } else if (seeds >= 15) {
+                    bufferHint = "\n⚡ Rýchly P2P stream";
+                }
+
                 return {
                     name: `SKT\n${staraKategoria}`,
-                    title: stream.title,
+                    title: `${stream.title}${bufferHint}`,
                     infoHash: stream.infoHash,
                     fileIdx: stream.fileIdx,
+                    sources: (stream.sources && stream.sources.length > 0) ? stream.sources : undefined,
                     behaviorHints: stream.behaviorHints,
                     _sortCached: 0,
                     _sortDub: stream.isDub ? 1 : 0,
@@ -3085,7 +3137,7 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
                     _sortSource: stream._sortSource || 'neznámy',
                     _sortQuality: getQualityRank(sortText),
                     _sortSize: getSizeBytes(sortText),
-                    _sortSeeds: stream.seeds || 0
+                    _sortSeeds: seeds
                 };
             });
         }
@@ -3765,8 +3817,9 @@ app.use((err, req, res, next) => {
     res.status(500).send("Chyba servera.");
 });
 
-// Export pre Genezio (httpServer typ)
+// Export pre Genezio a Vercel (@vercel/node)
 exports.handler = app;
+module.exports = app;
 
 // fallback pre lokálne spustenie
 app.listen(PORT, () => {
