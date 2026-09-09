@@ -1112,15 +1112,17 @@ async function stiahnutTorrentData(url, userAxios) {
 async function vytvoritStream(t, seria, epizoda, userAxios, meta, userConfig) {
     logInfo(`Creating stream for torrent ID: ${t.id} (${t.name})`);
     
-    // Debrid mode (TorBox/RD): info_hash je už v t.id z URL detail page,
-    // netreba sťahovať .torrent (ktorý vyžaduje prihlásenie na SKTorrent)
+    // Debrid mode (TorBox/RD) alebo P2P
     const maDebrid = !!(userConfig?.torbox || userConfig?.realdebrid);
     
     let torrentData = null;
-    if (!maDebrid) {
-        // P2P režim: potrebujeme .torrent pre zoznam súborov
-        torrentData = await stiahnutTorrentData(t.downloadUrl, userAxios);
-        if (!torrentData) return null;
+    torrentData = await stiahnutTorrentData(t.downloadUrl, userAxios);
+    if (!torrentData) {
+        const isHexHash = typeof t.id === "string" && /^[a-f0-9]{40}$/i.test(t.id);
+        if (!isHexHash && !maDebrid) return null;
+        if (isHexHash) {
+            logInfo(`Torrent .torrent nedostupny, pouzivam priamy infoHash ${t.id}`);
+        }
     }
     
     let najdenyIndex = -1;
@@ -1128,7 +1130,7 @@ async function vytvoritStream(t, seria, epizoda, userAxios, meta, userConfig) {
 
     // --- OČISTENIE NÁZVU (Hneď na začiatku, aby ho videl streamObj) ---
     let cistyNazov = t.name.replace(/^Stiahni si\s*/i, "").trim();
-    if (cistyNazov.toLowerCase().startsWith(t.category.trim().toLowerCase())) {
+    if (t.category && typeof t.category === "string" && cistyNazov.toLowerCase().startsWith(t.category.trim().toLowerCase())) {
         cistyNazov = cistyNazov.slice(t.category.length).trim();
     }
 
@@ -1350,9 +1352,15 @@ if (videoSubory.length === 1) {
     const kontrolaNazvov = [cistyNazov, najdenyNazovSuboru || ''].filter(Boolean).join(' ');
     const jeRdBlokovany = jeRDNazovBlokovany(kontrolaNazvov);
 
+    const defaultTrackers = [
+        "tracker:http://tracker.sktorrent.eu:2710/announce",
+        "tracker:udp://tracker.opentrackr.org:1337/announce",
+        "tracker:udp://open.stealth.si:80/announce"
+    ];
+
     // --- FINÁLNE TVORENIE OBJEKTU
     let streamObj = {
-        name: `SKT\n${t.category.toUpperCase()}`,
+        name: `SKT\n${(t.category || "SPORT").toUpperCase()}`,
         title: riadkyTitle.join("\n"),
         behaviorHints: { 
             bingeGroup: `sktorrent-${kvality.length > 0 ? kvality.join("-").replace(/\s/g, "") : "standard"}`
@@ -1361,7 +1369,7 @@ if (videoSubory.length === 1) {
         fileName: cistyNazovSuboru,
         infoHash: torrentData ? torrentData.infoHash : t.id,
         fileIdx: najdenyIndex === -1 ? 0 : najdenyIndex,
-        sources: (torrentData && torrentData.trackers) ? torrentData.trackers : [],
+        sources: (torrentData && Array.isArray(torrentData.trackers) && torrentData.trackers.length > 0) ? torrentData.trackers : defaultTrackers,
         isDub: jeSKCZ,
         seeds: t.seeds,
         _sortHdr: hdrTag,
@@ -2509,6 +2517,26 @@ const SKT_CATALOGS = [
     }
 ];
 
+function cleanDirectTitle(rawTitle) {
+    let t = String(rawTitle || "").trim();
+    t = t.replace(/^Stiahni si\s+(?:Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)[^:]*?(?::|\s{2,}|(?=[A-Z0-9]))/i, "").trim();
+    t = t.replace(/^Stiahni si\s+(?:Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)\s*/i, "").trim();
+    t = t.replace(/^Stiahni si\s*/i, "").trim();
+    t = t.replace(/=\s*CSFD\s*\d+%/gi, "").trim();
+    return t;
+}
+
+const sktMetaCache = new Map();
+
+function saveSktMeta(metaItem) {
+    if (!metaItem || !metaItem.id) return;
+    sktMetaCache.set(metaItem.id, metaItem);
+    if (sktMetaCache.size > 3000) {
+        const first = sktMetaCache.keys().next().value;
+        sktMetaCache.delete(first);
+    }
+}
+
 function cleanCatalogTitle(rawTitle, type) {
     let t = String(rawTitle || "");
     t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
@@ -2539,10 +2567,13 @@ async function matchCinemetaForCatalog(titleObj, type) {
     if (!titleObj || !titleObj.parts || titleObj.parts.length === 0) return null;
 
     for (const part of titleObj.parts.slice().reverse()) {
-        const cacheKey = `cinemeta_cat_${type}:${part}`;
+        const cleanPart = part.trim();
+        if (cleanPart.length < 3) continue;
+
+        const cacheKey = `cinemeta_cat_v2_${type}:${cleanPart}`;
         const match = await withCache(cacheKey, 86400000, async () => {
             try {
-                const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(part)}.json`;
+                const url = `https://v3-cinemeta.strem.io/catalog/${type}/top/search=${encodeURIComponent(cleanPart)}.json`;
                 const res = await axios.get(url, {
                     timeout: 3500,
                     httpAgent: sharedHttpAgent,
@@ -2552,6 +2583,17 @@ async function matchCinemetaForCatalog(titleObj, type) {
                 const metas = res.data?.metas;
                 if (Array.isArray(metas) && metas.length > 0) {
                     const first = metas[0];
+                    const firstNorm = odstranDiakritiku(first.name.toLowerCase()).replace(/[^a-z0-9]/g, "");
+                    const partNorm = odstranDiakritiku(cleanPart.toLowerCase()).replace(/[^a-z0-9]/g, "");
+
+                    if (firstNorm.length < 2 || partNorm.length < 2) return null;
+                    if (!firstNorm.includes(partNorm) && !partNorm.includes(firstNorm)) {
+                        const firstWords = odstranDiakritiku(first.name.toLowerCase()).split(/\s+/).filter(w => w.length > 2);
+                        const partWords = odstranDiakritiku(cleanPart.toLowerCase()).split(/\s+/).filter(w => w.length > 2);
+                        const hasOverlap = partWords.some(pw => firstWords.includes(pw));
+                        if (!hasOverlap) return null;
+                    }
+
                     return {
                         id: first.id,
                         type: first.type || type,
@@ -2574,7 +2616,7 @@ async function matchCinemetaForCatalog(titleObj, type) {
 
 async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
     const page = Math.floor(skip / 24);
-    const cacheKey = `catalog_${catalogDef.id}_page_${page}`;
+    const cacheKey = `catalog_v4_${catalogDef.id}_page_${page}`;
 
     return withCache(cacheKey, 1800000, async () => {
         logApi(`Fetching catalog ${catalogDef.name} (Page ${page})...`);
@@ -2629,6 +2671,34 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                 });
             });
 
+            const isDirectCatalog = catalogDef.id === 'skt_sport' || catalogDef.id === 'skt_docs';
+
+            if (isDirectCatalog) {
+                logInfo(`Catalog ${catalogDef.id}: direct mode, bypassing Cinemeta for ${rawItems.length} items`);
+                const metas = rawItems.map(item => {
+                    const cleanTitle = cleanDirectTitle(item.rawTitle);
+                    const posterUrl = item.poster && item.poster.startsWith('http')
+                        ? item.poster 
+                        : `https://cdn.sktorrent.eu/obrazky/${item.torrentId}.jpg`;
+                    const sktMeta = {
+                        id: `skt:${item.torrentId}`,
+                        type: catalogDef.type,
+                        name: cleanTitle,
+                        poster: posterUrl,
+                        background: posterUrl,
+                        releaseInfo: item.titleObj.year || undefined,
+                        description: `SKTorrent | ${item.size || '?'} | Seeders: ${item.seeds}`,
+                        size: item.size,
+                        seeds: item.seeds,
+                        category: catalogDef.id === 'skt_sport' ? 'Sport' : 'Dokument'
+                    };
+                    saveSktMeta(sktMeta);
+                    return sktMeta;
+                });
+                logSuccess(`Catalog ${catalogDef.id}: ready with ${metas.length} items`);
+                return metas;
+            }
+
             logInfo(`Catalog ${catalogDef.id}: found ${rawItems.length} torrents, resolving Cinemeta...`);
 
             const metas = [];
@@ -2639,14 +2709,24 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                     if (matched) {
                         return matched;
                     }
-                    return {
+                    const fallbackTitle = cleanDirectTitle(item.titleObj.rawClean || item.rawTitle);
+                    const posterUrl = item.poster && item.poster.startsWith('http')
+                        ? item.poster
+                        : `https://cdn.sktorrent.eu/obrazky/${item.torrentId}.jpg`;
+                    const fallbackMeta = {
                         id: `skt:${item.torrentId}`,
                         type: catalogDef.type,
-                        name: item.titleObj.rawClean || item.rawTitle,
-                        poster: item.poster || `${PUBLIC_URL}/logo.png`,
+                        name: fallbackTitle,
+                        poster: posterUrl,
+                        background: posterUrl,
                         releaseInfo: item.titleObj.year || undefined,
-                        description: `SKTorrent | ${item.size} | Seeders: ${item.seeds}`
+                        description: `SKTorrent | ${item.size} | Seeders: ${item.seeds}`,
+                        size: item.size,
+                        seeds: item.seeds,
+                        category: catalogDef.type === "series" ? "Serial" : "Film"
                     };
+                    saveSktMeta(fallbackMeta);
+                    return fallbackMeta;
                 }));
                 metas.push(...chunkMetas.filter(Boolean));
             }
@@ -2731,14 +2811,18 @@ app.get([
     const { type, id } = req.params;
     if (id && id.startsWith('skt:')) {
         const torrentId = id.replace(/^skt:/, '');
+        const cached = sktMetaCache.get(id);
+        const poster = cached?.poster || `https://cdn.sktorrent.eu/obrazky/${torrentId}.jpg`;
         const meta = {
             id,
-            type: type || "movie",
-            name: "SKTorrent Titul",
-            poster: `https://cdn.sktorrent.eu/obrazky/${torrentId}.jpg`,
-            background: `${PUBLIC_URL}/logo.png`,
-            description: "Prehrávanie cez SKTorrent doplnok"
+            type: type || cached?.type || "movie",
+            name: cached?.name || `SKTorrent (${torrentId.substring(0, 8)})`,
+            poster: poster,
+            background: cached?.background || poster,
+            description: cached?.description || "Prehrávanie cez SKTorrent doplnok",
+            releaseInfo: cached?.releaseInfo || undefined
         };
+        res.setHeader('Cache-Control', 'max-age=3600, stale-while-revalidate=1800');
         return res.json({ meta });
     }
     return res.status(404).json({ err: "Not found" });
@@ -2826,7 +2910,7 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
     //   tvdb-466037:1:1     (series, TVDB addon variant)
     //   tvdb:466037:official:1:1  (series, TVDB addon — oficiálny formát s 'official')
     //   skt:hash:1:1        (direct SKTorrent item)
-    const sktMatch = id.match(/^skt:([a-f0-9]+)(?::(\d+):(\d+))?$/i);
+    const sktMatch = id.match(/^skt:([a-zA-Z0-9_-]+)(?::(\d+):(\d+))?$/i);
     const imdbMatch = id.match(/^(tt\d+)(?::(\d+):(\d+))?$/);
     const tmdbMatch = id.match(/^tmdb:(\d+)(?::(\d+):(\d+))?$/);
     const tvdbMatch = id.match(/^tvdb[-: ]?(\d+)(?::official)?(?::(\d+):(\d+))?$/);
@@ -2876,7 +2960,15 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
 
     // 1. ZÍSKAME NÁZVY A ROK a META
     let metaData = null;
-    if (jeTvdbId) {
+    if (sktDirectId) {
+        const cached = sktMetaCache.get(rawId);
+        const sktTitle = cached?.name || `SKTorrent #${sktDirectId.substring(0, 8)}`;
+        metaData = {
+            nazvy: [sktTitle],
+            rok: cached?.releaseInfo || null,
+            meta: { titleOriginal: sktTitle, titleCz: sktTitle, yearStart: cached?.releaseInfo || null, yearEnd: null }
+        };
+    } else if (jeTvdbId) {
         const tvdbId = tvdbIdMatch[1];
         const nazvy = new Set();
         await pridajTvdbNazvy(nazvy, tvdbId, userConfig.tvdb);
@@ -2925,7 +3017,7 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
     // 2. ČSFD LINK — hľadáme podľa presného ČSFD URL (nájde aj tituly s odlišným SK/CZ názvom)
     // Pre TVDB ID nemáme IMDb ID — ČSFD vynecháme, hľadáme priamo podľa názvu.
         const hlavnyNazov = metaData?.meta?.titleOriginal || unikatneNazvy[0];
-        const csfdLink = jeTvdbId ? null : await ziskatCsfdUrl(rawId, hlavnyNazov, vydanyRok, vlastnyTyp);
+        const csfdLink = (jeTvdbId || sktDirectId) ? null : await ziskatCsfdUrl(rawId, hlavnyNazov, vydanyRok, vlastnyTyp);
     
     let torrenty = [];
     const videnieTorrentIds = new Set();
@@ -2947,9 +3039,13 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
 
     if (sktDirectId) {
         logInfo(`Direct SKT stream lookup for ID: ${sktDirectId}`);
+        const cached = sktMetaCache.get(rawId);
         torrenty.push({
-            name: "SKTorrent",
+            name: cached?.name || "SKTorrent",
             id: sktDirectId,
+            category: cached?.category || "Sport",
+            size: cached?.size || "?",
+            seeds: cached?.seeds || 0,
             downloadUrl: `${BASE_URL}/torrent/download.php?id=${sktDirectId}`
         });
         videnieTorrentIds.add(sktDirectId);
