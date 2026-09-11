@@ -2751,7 +2751,7 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.1.0",
+        version: "2.2.0",
         name: "TorrentSK",
         description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
@@ -2782,7 +2782,7 @@ app.get([
     '/:config/catalog/:type/:id/:extra.json'
 ], asyncRoute(async (req, res) => {
     const { type, id, config, extra } = req.params;
-    const catalogDef = SKT_CATALOGS.find(c => c.id === id && c.type === type);
+    const catalogDef = SKT_CATALOGS.find(c => c.id === id && (c.type === type || id === 'skt_sport' || id === 'skt_docs'));
     if (!catalogDef) {
         return res.json({ metas: [] });
     }
