@@ -1861,6 +1861,16 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 </div>
             </div>
 
+            <!-- 📑 Katalógy v Stremio -->
+            <div class="section">
+                <div class="section-header"><span class="icon">📑</span> <span data-i18n="section.catalogs">Katalógy v Stremio</span></div>
+                <div class="section-desc" data-i18n="desc.catalogs">Nastav poradie a zapni/vypni kategórie (● zapnuté, ○ vypnuté)</div>
+
+                <div id="catalogOrders">
+                    <!-- Dynamicky vytvorene cez JS -->
+                </div>
+            </div>
+
             <!-- 📊 Sort Order -->
             <div class="section">
                 <div class="section-header"><span class="icon">📊</span> <span data-i18n="section.sort">Sort Order</span></div>
@@ -1885,6 +1895,24 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
             // SORT_OPTIONS = poradie aj identita riadkov; select neni potrebný
             var SORT_OPTIONS = ['cached', 'quality', 'lang', 'seeds', 'size'];
             var SORT_LABELS = { cached: 'Cached', quality: 'Rozlíšenie', lang: 'Jazyk', seeds: 'Seedy', size: 'Veľkosť' };
+            var ALL_CATALOG_IDS = [
+                'skt_movies_trending',
+                'skt_series_popular',
+                'skt_sport',
+                'skt_docs',
+                'skt_movies_popular',
+                'skt_series_new',
+                'skt_movies_new'
+            ];
+            var CATALOG_LABELS = {
+                skt_movies_trending: '🔥 Dnes populárne filmy',
+                skt_series_popular: '📺 Populárne seriály',
+                skt_sport: '🏁 Šport',
+                skt_docs: '🌍 Dokumenty',
+                skt_movies_popular: '🎬 Najsťahovanejšie filmy',
+                skt_series_new: '✨ Najnovšie seriály',
+                skt_movies_new: '🆕 Najnovšie filmy'
+            };
             var CURR_LANG = localStorage.getItem('sktorrent_lang') || 'sk';
 
             var I18N = {
@@ -1945,6 +1973,15 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'label.maxPerRes': 'Max. na rozlíšenie',
                     'label.maxSize': 'Max. veľkosť súboru',
                     'label.minSeeds': 'Minimálny počet seedov',
+                    'section.catalogs': 'Katalógy v Stremio',
+                    'desc.catalogs': 'Nastav poradie a zapni/vypni katalógy na domovskej obrazovke (● zapnuté, ○ vypnuté)',
+                    'cat.skt_movies_trending': '🔥 Dnes populárne filmy',
+                    'cat.skt_series_popular': '📺 Populárne seriály',
+                    'cat.skt_sport': '🏁 Šport',
+                    'cat.skt_docs': '🌍 Dokumenty',
+                    'cat.skt_movies_popular': '🎬 Najsťahovanejšie filmy',
+                    'cat.skt_series_new': '✨ Najnovšie seriály',
+                    'cat.skt_movies_new': '🆕 Najnovšie filmy',
                     'desc.sort': 'Priorita radenia výsledkov',
                     'button.generate': '✨ Vygenerovať odkaz',
                     'result.title': 'Tvoj inštalačný odkaz',
@@ -2031,7 +2068,15 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'label.maxPerRes': 'Max per resolution',
                     'label.maxSize': 'Max file size',
                     'label.minSeeds': 'Minimum seeders',
-                    'section.sort': 'Sort Order',
+                    'section.catalogs': 'Stremio Catalogs',
+                    'desc.catalogs': 'Set catalog order and toggle categories on/off (● enabled, ○ disabled)',
+                    'cat.skt_movies_trending': '🔥 Trending Movies Today',
+                    'cat.skt_series_popular': '📺 Popular Series',
+                    'cat.skt_sport': '🏁 Sports',
+                    'cat.skt_docs': '🌍 Documentaries',
+                    'cat.skt_movies_popular': '🎬 Most Downloaded Movies',
+                    'cat.skt_series_new': '✨ Newest Series',
+                    'cat.skt_movies_new': '🆕 Newest Movies',
                     'desc.sort': 'Result sorting priority',
                     'button.generate': '✨ Generate link',
                     'result.title': 'Your install link',
@@ -2086,8 +2131,17 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     var key = el.getAttribute('data-i18n-link');
                     el.textContent = t(key);
                 });
-                // Update SORT_LABELS
+                // Update SORT_LABELS & CATALOG_LABELS
                 SORT_LABELS = { cached: t('sort.cached'), quality: t('sort.quality'), lang: t('sort.lang'), seeds: t('sort.seeds'), size: t('sort.size') };
+                CATALOG_LABELS = {
+                    skt_movies_trending: t('cat.skt_movies_trending'),
+                    skt_series_popular: t('cat.skt_series_popular'),
+                    skt_sport: t('cat.skt_sport'),
+                    skt_docs: t('cat.skt_docs'),
+                    skt_movies_popular: t('cat.skt_movies_popular'),
+                    skt_series_new: t('cat.skt_series_new'),
+                    skt_movies_new: t('cat.skt_movies_new')
+                };
                 // Re-render sort rows with new labels
                 var sortContainer = document.getElementById('sortOrders');
                 if (sortContainer) {
@@ -2100,6 +2154,18 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     }
                     if (vals.length) initSortRows(vals, activeMask);
                 }
+                // Re-render catalog rows with new labels
+                var catContainer = document.getElementById('catalogOrders');
+                if (catContainer) {
+                    var cvals = [];
+                    var cactiveMask = [];
+                    var crows = catContainer.querySelectorAll('.catalog-row');
+                    for (var ci = 0; ci < crows.length; ci++) {
+                        cvals.push(crows[ci].dataset.value);
+                        cactiveMask.push(crows[ci].dataset.active !== 'false');
+                    }
+                    if (cvals.length) initCatalogRows(cvals, cactiveMask);
+                }
                 // Update lang switcher active state
                 document.querySelectorAll('.lang-btn').forEach(function(btn) {
                     var lb = btn.getAttribute('data-lang-btn');
@@ -2108,7 +2174,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
             }
 
             function getSortValues() {
-                var rows = document.querySelectorAll('.sort-row');
+                var rows = document.querySelectorAll('#sortOrders .sort-row');
                 var vals = [];
                 for (var i = 0; i < rows.length; i++) {
                     if (rows[i].dataset.active !== 'false') {
@@ -2116,6 +2182,109 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     }
                 }
                 return vals;
+            }
+
+            function initCatalogRows(saved, activeMask) {
+                var container = document.getElementById('catalogOrders');
+                if (!container) return;
+                container.innerHTML = '';
+                var used = (saved && saved.length) ? saved.slice() : ALL_CATALOG_IDS.slice();
+                for (var k = 0; k < ALL_CATALOG_IDS.length; k++) {
+                    if (used.indexOf(ALL_CATALOG_IDS[k]) === -1) {
+                        used.push(ALL_CATALOG_IDS[k]);
+                    }
+                }
+                if (!activeMask || activeMask.length !== used.length) {
+                    activeMask = [];
+                    for (var mi = 0; mi < used.length; mi++) activeMask.push(true);
+                }
+                for (var i = 0; i < used.length; i++) {
+                    var row = document.createElement('div');
+                    row.className = 'sort-row catalog-row';
+                    row.dataset.idx = i;
+                    row.dataset.active = activeMask[i] ? 'true' : 'false';
+                    row.dataset.value = used[i];
+
+                    var numSpan = document.createElement('span');
+                    numSpan.className = 'num';
+                    numSpan.textContent = i + 1;
+                    row.appendChild(numSpan);
+
+                    var toggle = document.createElement('button');
+                    toggle.className = 'sort-toggle';
+                    toggle.innerHTML = activeMask[i] ? '\u25CF' : '\u25CB';
+                    toggle.setAttribute('onclick', 'toggleCatalogActive(this)');
+                    toggle.title = activeMask[i] ? (t('sort.toggleOff') || 'Klikni pre vypnutie') : (t('sort.toggleOn') || 'Klikni pre zapnutie');
+                    row.appendChild(toggle);
+
+                    var label = document.createElement('span');
+                    label.className = 'sort-label';
+                    label.textContent = CATALOG_LABELS[used[i]] || used[i];
+                    label.style.flex = '1';
+                    label.style.fontSize = '13px';
+                    label.style.color = '#ccc';
+                    row.appendChild(label);
+
+                    var up = document.createElement('button');
+                    up.className = 'sort-btn';
+                    up.innerHTML = '\u25B2';
+                    up.setAttribute('onclick', 'moveCatalog(this, -1)');
+                    if (i === 0) up.disabled = true;
+                    row.appendChild(up);
+
+                    var down = document.createElement('button');
+                    down.className = 'sort-btn';
+                    down.innerHTML = '\u25BC';
+                    down.setAttribute('onclick', 'moveCatalog(this, 1)');
+                    if (i === used.length - 1) down.disabled = true;
+                    row.appendChild(down);
+
+                    container.appendChild(row);
+                }
+            }
+
+            function toggleCatalogActive(btn) {
+                var row = btn.parentNode;
+                var isActive = row.dataset.active !== 'false';
+                row.dataset.active = isActive ? 'false' : 'true';
+                btn.innerHTML = isActive ? '\u25CB' : '\u25CF';
+                btn.title = isActive ? (t('sort.toggleOn') || 'Klikni pre zapnutie') : (t('sort.toggleOff') || 'Klikni pre vypnutie');
+            }
+
+            function moveCatalog(btn, dir) {
+                var row = btn.parentNode;
+                var container = document.getElementById('catalogOrders');
+                var rows = container.querySelectorAll('.catalog-row');
+                var idx = Array.prototype.indexOf.call(rows, row);
+                var newIdx = idx + dir;
+                if (newIdx < 0 || newIdx >= rows.length) return;
+
+                var vals = [];
+                var activeMask = [];
+                for (var i = 0; i < rows.length; i++) {
+                    vals.push(rows[i].dataset.value);
+                    activeMask.push(rows[i].dataset.active !== 'false');
+                }
+                var tmp = vals[idx];
+                vals[idx] = vals[newIdx];
+                vals[newIdx] = tmp;
+                var tmpMask = activeMask[idx];
+                activeMask[idx] = activeMask[newIdx];
+                activeMask[newIdx] = tmpMask;
+                initCatalogRows(vals, activeMask);
+            }
+
+            function getCatalogValues() {
+                var rows = document.querySelectorAll('#catalogOrders .catalog-row');
+                var activeVals = [];
+                var allVals = [];
+                for (var i = 0; i < rows.length; i++) {
+                    allVals.push(rows[i].dataset.value);
+                    if (rows[i].dataset.active !== 'false') {
+                        activeVals.push(rows[i].dataset.value);
+                    }
+                }
+                return { active: activeVals, all: allVals };
             }
 
             function initSortRows(saved, activeMask) {
@@ -2243,6 +2412,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 }
                 var debridProvider = document.getElementById('debridProvider').value;
                 var jeDebridMod = debridProvider === 'torbox' || debridProvider === 'realdebrid';
+                var catInfo = getCatalogValues();
                 var config = {
                     uid: uidVal,
                     pass: passVal,
@@ -2251,6 +2421,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     realdebrid: document.getElementById('realdebrid').value,
                     tmdb: document.getElementById('tmdb').value,
                     tvdb: document.getElementById('tvdb').value,
+                    catalogs: catInfo.active,
+                    catOrder: catInfo.all,
                     lang: getActiveChips('#langChips .chip'),
                     show: getActiveChips('#showChips .chip'),
                     cachedOnly: jeDebridMod && document.getElementById('cachedOnly').checked,
@@ -2431,6 +2603,28 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     btn.textContent = t('button.login') || 'Prihlásiť sa';
                 });
             }
+
+            // Initialise catalog order
+            var savedCatOrder = ${(() => {
+                const co = currentConfig.catOrder;
+                if (co && Array.isArray(co)) return JSON.stringify(co);
+                const cats = currentConfig.catalogs;
+                if (cats && Array.isArray(cats)) return JSON.stringify(cats);
+                return 'null';
+            })()};
+            var savedCatActive = ${(() => {
+                const cats = currentConfig.catalogs;
+                const catOrder = currentConfig.catOrder;
+                if (cats && Array.isArray(cats) && catOrder && Array.isArray(catOrder)) {
+                    const mask = catOrder.map(id => cats.includes(id));
+                    return JSON.stringify(mask);
+                } else if (cats && Array.isArray(cats)) {
+                    const mask = cats.map(() => true);
+                    return JSON.stringify(mask);
+                }
+                return 'null';
+            })()};
+            initCatalogRows(savedCatOrder, savedCatActive);
 
             // Initialise sort order
             var savedSort = ${(() => {
@@ -2749,15 +2943,34 @@ const handleManifest = (req, res) => {
         'Surrogate-Control': 'no-store'
     });
 
+    const userConfig = req.params?.config ? decodeConfig(req.params.config) : null;
+    let selectedCatalogs = SKT_CATALOGS;
+
+    if (userConfig && Array.isArray(userConfig.catalogs)) {
+        const ordered = [];
+        for (const catId of userConfig.catalogs) {
+            const found = SKT_CATALOGS.find(c => c.id === catId);
+            if (found) ordered.push(found);
+        }
+        selectedCatalogs = ordered;
+    }
+
+    const typesSet = new Set(selectedCatalogs.map(c => c.type));
+    typesSet.add("movie");
+    typesSet.add("series");
+    if (selectedCatalogs.some(c => c.type === "other")) {
+        typesSet.add("other");
+    }
+
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.4.0",
+        version: "2.5.0",
         name: "TorrentSK",
         description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
         icon: `${PUBLIC_URL}/logo.png`,
-        types: ["movie", "series", "other"],
-        catalogs: SKT_CATALOGS.map(c => ({
+        types: Array.from(typesSet),
+        catalogs: selectedCatalogs.map(c => ({
             type: c.type,
             id: c.id,
             name: c.name,
