@@ -2476,16 +2476,8 @@ const SKT_CATALOGS = [
         active: 0
     },
     {
-        type: "movie",
-        id: "skt_sport",
-        name: "SKTorrent - Šport",
-        category: 44,
-        order: "data",
-        active: 0
-    },
-    {
         type: "other",
-        id: "skt_sport_other",
+        id: "skt_sport",
         name: "SKTorrent - Šport",
         category: 44,
         order: "data",
@@ -2759,7 +2751,7 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.3.0",
+        version: "2.4.0",
         name: "TorrentSK",
         description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
