@@ -2468,22 +2468,6 @@ const SKT_CATALOGS = [
         active: 1
     },
     {
-        type: "movie",
-        id: "skt_movies_popular",
-        name: "SKTorrent - Najsťahovanejšie filmy",
-        category: 1,
-        order: "finished",
-        active: 0
-    },
-    {
-        type: "movie",
-        id: "skt_movies_new",
-        name: "SKTorrent - Najnovšie filmy",
-        category: 1,
-        order: "data",
-        active: 0
-    },
-    {
         type: "series",
         id: "skt_series_popular",
         name: "SKTorrent - Najsťahovanejšie seriály",
@@ -2492,10 +2476,18 @@ const SKT_CATALOGS = [
         active: 0
     },
     {
-        type: "series",
-        id: "skt_series_new",
-        name: "SKTorrent - Najnovšie seriály",
-        category: 16,
+        type: "movie",
+        id: "skt_sport",
+        name: "SKTorrent - Šport",
+        category: 44,
+        order: "data",
+        active: 0
+    },
+    {
+        type: "other",
+        id: "skt_sport_other",
+        name: "SKTorrent - Šport",
+        category: 44,
         order: "data",
         active: 0
     },
@@ -2509,9 +2501,25 @@ const SKT_CATALOGS = [
     },
     {
         type: "movie",
-        id: "skt_sport",
-        name: "SKTorrent - Šport",
-        category: 44,
+        id: "skt_movies_popular",
+        name: "SKTorrent - Najsťahovanejšie filmy",
+        category: 1,
+        order: "finished",
+        active: 0
+    },
+    {
+        type: "series",
+        id: "skt_series_new",
+        name: "SKTorrent - Najnovšie seriály",
+        category: 16,
+        order: "data",
+        active: 0
+    },
+    {
+        type: "movie",
+        id: "skt_movies_new",
+        name: "SKTorrent - Najnovšie filmy",
+        category: 1,
         order: "data",
         active: 0
     }
@@ -2671,7 +2679,7 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                 });
             });
 
-            const isDirectCatalog = catalogDef.id === 'skt_sport' || catalogDef.id === 'skt_docs';
+            const isDirectCatalog = catalogDef.id.startsWith('skt_sport') || catalogDef.id === 'skt_docs';
 
             if (isDirectCatalog) {
                 logInfo(`Catalog ${catalogDef.id}: direct mode, bypassing Cinemeta for ${rawItems.length} items`);
@@ -2690,7 +2698,7 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                         description: `SKTorrent | ${item.size || '?'} | Seeders: ${item.seeds}`,
                         size: item.size,
                         seeds: item.seeds,
-                        category: catalogDef.id === 'skt_sport' ? 'Sport' : 'Dokument'
+                        category: catalogDef.id.startsWith('skt_sport') ? 'Sport' : 'Dokument'
                     };
                     saveSktMeta(sktMeta);
                     return sktMeta;
@@ -2751,12 +2759,12 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.2.0",
+        version: "2.3.0",
         name: "TorrentSK",
         description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
         icon: `${PUBLIC_URL}/logo.png`,
-        types: ["movie", "series"],
+        types: ["movie", "series", "other"],
         catalogs: SKT_CATALOGS.map(c => ({
             type: c.type,
             id: c.id,
@@ -2782,7 +2790,7 @@ app.get([
     '/:config/catalog/:type/:id/:extra.json'
 ], asyncRoute(async (req, res) => {
     const { type, id, config, extra } = req.params;
-    const catalogDef = SKT_CATALOGS.find(c => c.id === id && (c.type === type || id === 'skt_sport' || id === 'skt_docs'));
+    const catalogDef = SKT_CATALOGS.find(c => c.id === id && (c.type === type || id.startsWith('skt_sport') || id === 'skt_docs'));
     if (!catalogDef) {
         return res.json({ metas: [] });
     }
