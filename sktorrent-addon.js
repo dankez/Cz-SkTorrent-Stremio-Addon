@@ -1869,6 +1869,24 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 <div id="catalogOrders">
                     <!-- Dynamicky vytvorene cez JS -->
                 </div>
+
+                <!-- 👶 Vek pre detský obsah -->
+                <div style="margin: 12px 20px 6px 20px; padding: 10px 14px; background: rgba(118, 184, 62, 0.08); border: 1px solid #2a4520; border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                        <label style="font-size:13px; color:#e0e0e0; font-weight:600; display:flex; align-items:center; gap:6px; margin-bottom:0;">
+                            <span>👶</span> <span data-i18n="label.kidsAge">Vek pre kategóriu Pre deti:</span>
+                        </label>
+                        <select id="kidsAge" style="padding:6px 12px; background:#0d1a0b; border:1px solid #76B83E; color:#76B83E; border-radius:6px; font-weight:bold; font-size:13px; outline:none; cursor:pointer;">
+                            <option value="6" ${getSelect('kidsAge', '6', '12')}>👶 Do 6 rokov (Predškoláci)</option>
+                            <option value="12" ${getSelect('kidsAge', '12', '12')}>🧒 Do 12 rokov (Školáci)</option>
+                            <option value="16" ${getSelect('kidsAge', '16', '12')}>🧑 Do 16 rokov (Mládež)</option>
+                            <option value="all" ${getSelect('kidsAge', 'all', '12')}>⭐ Bez obmedzenia</option>
+                        </select>
+                    </div>
+                    <div style="font-size:11px; color:#888; margin-top:5px; line-height:1.4;" data-i18n="desc.kidsAge">
+                        Filtruje rozprávky a animáky podľa veku dieťaťa (podobne ako detský profil na Netflixe alebo YouTube Kids).
+                    </div>
+                </div>
             </div>
 
             <!-- 📊 Sort Order -->
@@ -1898,6 +1916,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
             var ALL_CATALOG_IDS = [
                 'skt_movies_trending',
                 'skt_series_popular',
+                'skt_kids',
+                'skt_kids_series',
                 'skt_sport',
                 'skt_docs',
                 'skt_movies_popular',
@@ -1907,6 +1927,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
             var CATALOG_LABELS = {
                 skt_movies_trending: '🔥 Dnes populárne filmy',
                 skt_series_popular: '📺 Populárne seriály',
+                skt_kids: '👶 Pre deti (Rozprávky a filmy)',
+                skt_kids_series: '🧸 Detské seriály',
                 skt_sport: '🏁 Šport',
                 skt_docs: '🌍 Dokumenty',
                 skt_movies_popular: '🎬 Najsťahovanejšie filmy',
@@ -1977,11 +1999,15 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.catalogs': 'Nastav poradie a zapni/vypni katalógy na domovskej obrazovke (● zapnuté, ○ vypnuté)',
                     'cat.skt_movies_trending': '🔥 Dnes populárne filmy',
                     'cat.skt_series_popular': '📺 Populárne seriály',
+                    'cat.skt_kids': '👶 Pre deti (Rozprávky a filmy)',
+                    'cat.skt_kids_series': '🧸 Detské seriály',
                     'cat.skt_sport': '🏁 Šport',
                     'cat.skt_docs': '🌍 Dokumenty',
                     'cat.skt_movies_popular': '🎬 Najsťahovanejšie filmy',
                     'cat.skt_series_new': '✨ Najnovšie seriály',
                     'cat.skt_movies_new': '🆕 Najnovšie filmy',
+                    'label.kidsAge': 'Vek pre kategóriu Pre deti:',
+                    'desc.kidsAge': 'Filtruje rozprávky a animáky podľa veku dieťaťa (podobne ako detský profil na Netflixe alebo YouTube Kids).',
                     'desc.sort': 'Priorita radenia výsledkov',
                     'button.generate': '✨ Vygenerovať odkaz',
                     'result.title': 'Tvoj inštalačný odkaz',
@@ -2072,11 +2098,15 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     'desc.catalogs': 'Set catalog order and toggle categories on/off (● enabled, ○ disabled)',
                     'cat.skt_movies_trending': '🔥 Trending Movies Today',
                     'cat.skt_series_popular': '📺 Popular Series',
+                    'cat.skt_kids': '👶 Kids (Cartoons & Movies)',
+                    'cat.skt_kids_series': '🧸 Kids Series',
                     'cat.skt_sport': '🏁 Sports',
                     'cat.skt_docs': '🌍 Documentaries',
                     'cat.skt_movies_popular': '🎬 Most Downloaded Movies',
                     'cat.skt_series_new': '✨ Newest Series',
                     'cat.skt_movies_new': '🆕 Newest Movies',
+                    'label.kidsAge': 'Age rating for Kids category:',
+                    'desc.kidsAge': 'Filters cartoons, animations and series according to child age (similar to Netflix Kids or YouTube Kids profile).',
                     'desc.sort': 'Result sorting priority',
                     'button.generate': '✨ Generate link',
                     'result.title': 'Your install link',
@@ -2136,6 +2166,8 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 CATALOG_LABELS = {
                     skt_movies_trending: t('cat.skt_movies_trending'),
                     skt_series_popular: t('cat.skt_series_popular'),
+                    skt_kids: t('cat.skt_kids'),
+                    skt_kids_series: t('cat.skt_kids_series'),
                     skt_sport: t('cat.skt_sport'),
                     skt_docs: t('cat.skt_docs'),
                     skt_movies_popular: t('cat.skt_movies_popular'),
@@ -2423,6 +2455,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     tvdb: document.getElementById('tvdb').value,
                     catalogs: catInfo.active,
                     catOrder: catInfo.all,
+                    kidsAge: document.getElementById('kidsAge') ? document.getElementById('kidsAge').value : '12',
                     lang: getActiveChips('#langChips .chip'),
                     show: getActiveChips('#showChips .chip'),
                     cachedOnly: jeDebridMod && document.getElementById('cachedOnly').checked,
@@ -2636,6 +2669,13 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 return 'null';
             })()};
             initSortRows(savedSort);
+            // Initialise kids age
+            var savedKidsAge = ${JSON.stringify(currentConfig.kidsAge || '12')};
+            var kidsAgeEl = document.getElementById('kidsAge');
+            if (kidsAgeEl && savedKidsAge) {
+                kidsAgeEl.value = savedKidsAge;
+            }
+
             // Apply debrid field visibility on load
             toggleDebridFields();
             // Apply saved language on load
@@ -2668,6 +2708,23 @@ const SKT_CATALOGS = [
         category: 16,
         order: "finished",
         active: 0
+    },
+    {
+        type: "movie",
+        id: "skt_kids",
+        name: "SKTorrent - Pre deti",
+        category: 5,
+        order: "seeds",
+        active: 0
+    },
+    {
+        type: "series",
+        id: "skt_kids_series",
+        name: "SKTorrent - Detské seriály",
+        category: 16,
+        order: "data",
+        active: 0,
+        zaner: "Animovany"
     },
     {
         type: "other",
@@ -2713,8 +2770,9 @@ const SKT_CATALOGS = [
 
 function cleanDirectTitle(rawTitle) {
     let t = String(rawTitle || "").trim();
-    t = t.replace(/^Stiahni si\s+(?:Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)[^:]*?(?::|\s{2,}|(?=[A-Z0-9]))/i, "").trim();
-    t = t.replace(/^Stiahni si\s+(?:Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)\s*/i, "").trim();
+    t = t.replace(/^Stiahni si\s+(?:Filmy Kreslené|Kreslené|Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)[^:]*?(?::|\s{2,}|(?=[A-Z0-9]))/i, "").trim();
+    t = t.replace(/^Stiahni si\s+(?:Filmy Kreslené|Kreslené|Sport|Šport|Dokument|Filmy|Seriál|TV Pořad)\s*/i, "").trim();
+    t = t.replace(/^Kreslené\s+/i, "").trim();
     t = t.replace(/^Stiahni si\s*/i, "").trim();
     t = t.replace(/=\s*CSFD\s*\d+%/gi, "").trim();
     return t;
@@ -2733,8 +2791,9 @@ function saveSktMeta(metaItem) {
 
 function cleanCatalogTitle(rawTitle, type) {
     let t = String(rawTitle || "");
-    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
-    t = t.replace(/^Stiahni si\s+(?:Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)/i, "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy Kreslené|Kreslené|Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)[^:]*?(?:CZ\/SK|SK\/CZ)?[^:]*?dabing/i, "");
+    t = t.replace(/^Stiahni si\s+(?:Filmy Kreslené|Kreslené|Filmy|Seriál|Dokument|TV Pořad|Sport|Šport)/i, "");
+    t = t.replace(/^Kreslené\s+/i, "");
     t = t.replace(/\b(?:CZ\/SK|SK\/CZ|CZ\/EN|SK\/EN)\b/gi, "");
     t = t.replace(/=\s*CSFD\s*\d+%/gi, "").trim();
 
@@ -2755,6 +2814,83 @@ function cleanCatalogTitle(rawTitle, type) {
 
     const parts = t.split("/").map(p => p.trim()).filter(p => p.length >= 2);
     return { parts, year, rawClean: parts[0] || t };
+}
+
+function isAgeAppropriate(item, matchedMeta, maxAge) {
+    if (!maxAge || maxAge === 'all') return true;
+    const age = parseInt(maxAge, 10);
+    if (isNaN(age)) return true;
+
+    const rawTitle = (item.rawTitle || '').toLowerCase();
+    const cleanTitle = (item.titleObj?.rawClean || matchedMeta?.name || '').toLowerCase();
+    const zanre = (item.zanre || []).map(z => z.toLowerCase());
+    const cinemetaGenres = (matchedMeta?.genres || []).map(g => g.toLowerCase());
+    const allGenres = [...zanre, ...cinemetaGenres];
+
+    // 1. Explicitné označenie veku v názve torrentu
+    if (rawTitle.includes('18+') || rawTitle.includes('[18+]') || rawTitle.includes('(18+)') || rawTitle.includes('18 +')) {
+        return false;
+    }
+    if (age < 18 && (allGenres.includes('eroticky') || allGenres.includes('erotic') || allGenres.includes('adult') || rawTitle.includes('xxx'))) {
+        return false;
+    }
+    if (age < 15 && (rawTitle.includes('15+') || rawTitle.includes('[15+]') || rawTitle.includes('(15+)'))) {
+        return false;
+    }
+    if (age < 12 && (rawTitle.includes('12+') || rawTitle.includes('[12+]') || rawTitle.includes('(12+)'))) {
+        return false;
+    }
+
+    // 2. Obsah pre dospelých a nevhodné žánre pre deti <= 12 rokov
+    if (age <= 12) {
+        const matureGenres = [
+            'horor', 'horror',
+            'thriller',
+            'krimi', 'crime',
+            'valecny', 'war',
+            'eroticky', 'erotic', 'adult',
+            'psychologicky', 'psychological'
+        ];
+        if (allGenres.some(g => matureGenres.includes(g))) {
+            return false;
+        }
+
+        // Animované seriály / filmy určené výhradne pre dospelých (Adult animation)
+        const adultAnimations = [
+            'south park', 'rick and morty', 'rick & morty', 'family guy', 'griffinovi',
+            'griffinoci', 'futurama', 'bojack', 'sausage party', 'buchty a klobásy',
+            'archer', 'big mouth', 'harley quinn', 'invincible', 'hazbin hotel',
+            'helluva boss', 'castlevania', 'deadpool', 'chainsaw man', 'attack on titan'
+        ];
+        if (adultAnimations.some(a => cleanTitle.includes(a) || rawTitle.includes(a))) {
+            return false;
+        }
+
+        // Kľúčové slová násilia a brutality
+        const matureWords = [
+            'vražda', 'vrah', 'masaker', 'zabijak', 'blood', 'krve',
+            'smrť', 'death', 'mŕtv', 'dead', 'porn', 'sex', 'erotik'
+        ];
+        if (matureWords.some(w => rawTitle.includes(w) || cleanTitle.includes(w))) {
+            return false;
+        }
+    }
+
+    // 3. Pre predškolákov a malé deti (vek <= 6 rokov)
+    if (age <= 6) {
+        const nonToddlerGenres = ['akcni', 'action', 'drama', 'mysteriozni', 'mystery', 'katastroficky'];
+        if (allGenres.some(g => nonToddlerGenres.includes(g))) {
+            return false;
+        }
+        const scaryWords = [
+            'démon', 'demon', 'diabol', 'devil', 'zombie', 'temn', 'dark'
+        ];
+        if (scaryWords.some(w => rawTitle.includes(w) || cleanTitle.includes(w))) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 async function matchCinemetaForCatalog(titleObj, type) {
@@ -2808,21 +2944,28 @@ async function matchCinemetaForCatalog(titleObj, type) {
     return null;
 }
 
-async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
+async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios, userConfig = {}) {
     const page = Math.floor(skip / 24);
-    const cacheKey = `catalog_v4_${catalogDef.id}_page_${page}`;
+    const kidsAge = userConfig?.kidsAge || '12';
+    const isKids = catalogDef.id.startsWith('skt_kids');
+    const cacheKey = `catalog_v5_${catalogDef.id}_${isKids ? 'age_' + kidsAge + '_' : ''}page_${page}`;
 
     return withCache(cacheKey, 1800000, async () => {
-        logApi(`Fetching catalog ${catalogDef.name} (Page ${page})...`);
+        logApi(`Fetching catalog ${catalogDef.name} (Page ${page}, KidsAge: ${kidsAge})...`);
         try {
+            const queryParams = {
+                category: catalogDef.category,
+                order: catalogDef.order,
+                by: 'DESC',
+                page: page,
+                active: catalogDef.active || 0
+            };
+            if (catalogDef.zaner) {
+                queryParams.zaner = catalogDef.zaner;
+            }
+
             const res = await userAxios.get(SEARCH_URL, {
-                params: {
-                    category: catalogDef.category,
-                    order: catalogDef.order,
-                    by: 'DESC',
-                    page: page,
-                    active: catalogDef.active || 0
-                },
+                params: queryParams,
                 timeout: 8000
             });
 
@@ -2847,6 +2990,12 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                 const size = velkostMatch ? velkostMatch[1].trim() : "";
                 const seeds = seedMatch ? parseInt(seedMatch[1]) : 0;
 
+                const zanre = [];
+                td.find('a[href*="zaner="]').each((_, z) => {
+                    const zText = $(z).text().trim();
+                    if (zText) zanre.push(zText);
+                });
+
                 const titleObj = cleanCatalogTitle(rawTitle, catalogDef.type);
 
                 if (catalogDef.type === "series") {
@@ -2861,6 +3010,7 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                     poster,
                     size,
                     seeds,
+                    zanre,
                     titleObj
                 });
             });
@@ -2900,6 +3050,14 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                 const chunk = rawItems.slice(i, i + 6);
                 const chunkMetas = await Promise.all(chunk.map(async (item) => {
                     const matched = await matchCinemetaForCatalog(item.titleObj, catalogDef.type);
+
+                    // Overenie vekovej vhodnosti pre Kids katalógy alebo keď je zapnutý filter
+                    if (isKids || (userConfig?.kidsAge && userConfig.kidsAge !== 'all')) {
+                        if (!isAgeAppropriate(item, matched, kidsAge)) {
+                            return null;
+                        }
+                    }
+
                     if (matched) {
                         return matched;
                     }
@@ -2917,7 +3075,7 @@ async function fetchSkTorrentCatalog(catalogDef, skip = 0, userAxios = axios) {
                         description: `SKTorrent | ${item.size} | Seeders: ${item.seeds}`,
                         size: item.size,
                         seeds: item.seeds,
-                        category: catalogDef.type === "series" ? "Serial" : "Film"
+                        category: isKids ? "Rozpravka" : (catalogDef.type === "series" ? "Serial" : "Film")
                     };
                     saveSktMeta(fallbackMeta);
                     return fallbackMeta;
@@ -2964,7 +3122,7 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.5.0",
+        version: "2.6.0",
         name: "TorrentSK",
         description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
@@ -2995,7 +3153,7 @@ app.get([
     '/:config/catalog/:type/:id/:extra.json'
 ], asyncRoute(async (req, res) => {
     const { type, id, config, extra } = req.params;
-    const catalogDef = SKT_CATALOGS.find(c => c.id === id && (c.type === type || id.startsWith('skt_sport') || id === 'skt_docs'));
+    const catalogDef = SKT_CATALOGS.find(c => c.id === id && (c.type === type || id.startsWith('skt_sport') || id === 'skt_docs' || id.startsWith('skt_kids')));
     if (!catalogDef) {
         return res.json({ metas: [] });
     }
@@ -3012,7 +3170,7 @@ app.get([
     const userConfig = config ? decodeConfig(config) : {};
     const userAxios = getFastAxios(userConfig || {});
 
-    const metas = await fetchSkTorrentCatalog(catalogDef, skip, userAxios);
+    const metas = await fetchSkTorrentCatalog(catalogDef, skip, userAxios, userConfig);
     res.setHeader('Cache-Control', 'max-age=1800, stale-while-revalidate=1800');
     return res.json({ metas: metas || [] });
 }));
