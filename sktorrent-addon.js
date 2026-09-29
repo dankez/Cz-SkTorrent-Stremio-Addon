@@ -34,6 +34,8 @@ const PORT = process.env.PORT || 7000;
 const PUBLIC_URL = process.env.PUBLIC_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `http://localhost:${PORT}`); 
 const BASE_URL = "https://sktorrent.eu"; 
 const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
+const TREZZOR_BASE_URL = "https://tracker.czech-server.com";
+const TREZZOR_SEARCH_URL = `${TREZZOR_BASE_URL}/torrents.php`;
 
 const agentOptions = { keepAlive: true, maxSockets: 50 };
 
@@ -156,13 +158,33 @@ const sharedHttpsAgent = new https.Agent(agentOptions);
 function getFastAxios(userConfig) {
     const { uid, pass } = userConfig;
     return axios.create({
-        timeout: 5000, 
+        timeout: 8000, 
         httpAgent: sharedHttpAgent,
         httpsAgent: sharedHttpsAgent,
         headers: {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             "Cookie": `uid=${uid}; pass=${pass}`,
             "Referer": BASE_URL,
+            "Connection": "keep-alive"
+        }
+    });
+}
+
+function getTrezzorAxios(userConfig) {
+    const uid = userConfig?.trezzor_uid;
+    const pass = userConfig?.trezzor_pass;
+    const secure2 = userConfig?.trezzor_secure2;
+    if (!uid || !pass) return null;
+    let cookieStr = `uid=${uid}; pass=${pass}`;
+    if (secure2) cookieStr += `; secure2=${secure2}`;
+    return axios.create({
+        timeout: 8000,
+        httpAgent: sharedHttpAgent,
+        httpsAgent: sharedHttpsAgent,
+        headers: {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+            "Cookie": cookieStr,
+            "Referer": TREZZOR_BASE_URL,
             "Connection": "keep-alive"
         }
     });
@@ -345,8 +367,15 @@ function rdHeaders(apiKey) {
     return { "Authorization": `Bearer ${apiKey}`, "User-Agent": "TorrentSK/1.0" };
 }
 
-async function rdAddMagnet(apiKey, hash) {
-    const magnet = `magnet:?xt=urn:btih:${hash}`;
+async function rdAddMagnet(apiKey, hash, trackers = []) {
+    let trPart = "";
+    const effectiveTrackers = (Array.isArray(trackers) && trackers.length > 0) ? trackers : [
+        "https://sktorrent.eu/torrent/announce.php",
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce"
+    ];
+    trPart = effectiveTrackers.map(t => `&tr=${encodeURIComponent(t.replace(/^tracker:/, ''))}`).join("");
+    const magnet = `magnet:?xt=urn:btih:${hash}${trPart}`;
     const res = await axios.post(`${RD_API_BASE}/torrents/addMagnet`,
         `magnet=${encodeURIComponent(magnet)}`,
         { headers: { ...rdHeaders(apiKey), "Content-Type": "application/x-www-form-urlencoded" }, timeout: RD_AXIOS_TIMEOUT }
@@ -1071,32 +1100,97 @@ function extractTorrentTrackers(torrent) {
     return [...new Set(trackers)];
 }
 
+async function ziskatSuboryZDetails(torrentId, userAxios) {
+    return withCache(`skt:details:${torrentId}`, 86400000, async () => {
+        try {
+            logApi(`Načítavam detaily z details.php pre ID: ${torrentId}`);
+            const res = await userAxios.get(`${BASE_URL}/torrent/details.php?id=${torrentId}`, { timeout: 8000 });
+            const $ = cheerio.load(res.data);
+            const subory = [];
+            
+            // 1. Zoznam súborov z tabuľky #files
+            $('#files table tr').each((i, el) => {
+                if (i === 0) return; // preskočiť hlavičku
+                const tds = $(el).find('td');
+                const meno = $(tds[0]).text().trim();
+                const velkostText = $(tds[1]).text().trim();
+                if (meno) {
+                    subory.push({
+                        path: meno,
+                        index: subory.length,
+                        length: getSizeBytes(velkostText)
+                    });
+                }
+            });
+
+            // 2. Ak tabuľka #files neexistuje, skúsime nájsť súbor z popisu
+            if (subory.length === 0) {
+                let menoSuboru = '';
+                $('td.lista').each((i, el) => {
+                    const text = $(el).text().trim();
+                    const m = text.match(/([a-zA-Z0-9._\-– ]+\.(mp4|mkv|avi|m4v))/i);
+                    if (m && !menoSuboru) menoSuboru = m[1].trim();
+                });
+                if (menoSuboru) {
+                    subory.push({ path: menoSuboru, index: 0, length: 1048576 });
+                }
+            }
+
+            if (subory.length > 0 || (/^[a-f0-9]{40}$/i.test(torrentId))) {
+                return {
+                    infoHash: torrentId,
+                    files: subory.length > 0 ? subory : [{ path: 'video.mkv', index: 0, length: 1048576 }],
+                    trackers: [
+                        "tracker:https://sktorrent.eu/torrent/announce.php",
+                        "tracker:udp://tracker.opentrackr.org:1337/announce",
+                        "tracker:udp://open.stealth.si:80/announce"
+                    ]
+                };
+            }
+        } catch (e) {
+            logError(`Chyba pri načítaní details.php pre ${torrentId}`, e);
+        }
+        return null;
+    });
+}
+
 async function stiahnutTorrentData(url, userAxios) {
     return withCache(`torrent:${url}`, 86400000, async () => { 
         logApi(`Downloading .torrent file from: ${url}`);
+        const torrentId = url.split("id=").pop().split("&")[0];
         try {
             const res = await userAxios.get(url, { responseType: "arraybuffer" });
             const bufferString = res.data.toString("utf8", 0, 50);
             if (bufferString.includes("<html") || bufferString.includes("<!DOC")) {
-                logWarn(`Received HTML instead of .torrent file from ${url}`);
+                logWarn(`Received HTML instead of .torrent file from ${url} (pravdepodobne ratio limit alebo login)`);
+                if (torrentId) {
+                    const fallbackData = await ziskatSuboryZDetails(torrentId, userAxios);
+                    if (fallbackData) {
+                        logSuccess(`Získané metadáta z details.php pre ${torrentId} (Fallback pri ratio limite)`);
+                        return fallbackData;
+                    }
+                }
                 return null;
             }
 
             const torrent = bencode.decode(res.data);
             const info = bencode.encode(torrent.info);
             const infoHash = crypto.createHash("sha1").update(info).digest("hex");
-            const trackers = extractTorrentTrackers(torrent);
+            let trackers = extractTorrentTrackers(torrent);
+            if (!trackers || trackers.length === 0) {
+                trackers = ["tracker:https://sktorrent.eu/torrent/announce.php"];
+            }
 
             let subory = [];
             if (torrent.info.files) {
                 subory = torrent.info.files.map((file, index) => {
                     const cesta = (file["path.utf-8"] || file.path || []).map(p => p.toString()).join("/");
-                    const length = Number(file.length || 0); // Uloženie veľkosti v bytoch
+                    const length = Number(file.length || 0);
                     return { path: cesta, index, length };
                 });
             } else {
                 const nazov = (torrent.info["name.utf-8"] || torrent.info.name || "").toString();
-                const length = Number(torrent.info.length || 0); // Uloženie veľkosti v bytoch
+                const length = Number(torrent.info.length || 0);
                 subory = [{ path: nazov, index: 0, length }];
             }
 
@@ -1104,6 +1198,13 @@ async function stiahnutTorrentData(url, userAxios) {
             return { infoHash, files: subory, trackers };
         } catch (chyba) {
             logError(`Failed to download/parse .torrent from ${url}`, chyba);
+            if (torrentId) {
+                const fallbackData = await ziskatSuboryZDetails(torrentId, userAxios);
+                if (fallbackData) {
+                    logSuccess(`Získané metadáta z details.php pre ${torrentId} (Fallback po chybe downloadu)`);
+                    return fallbackData;
+                }
+            }
             return null;
         }
     });
@@ -1353,7 +1454,7 @@ if (videoSubory.length === 1) {
     const jeRdBlokovany = jeRDNazovBlokovany(kontrolaNazvov);
 
     const defaultTrackers = [
-        "tracker:http://tracker.sktorrent.eu:2710/announce",
+        "tracker:https://sktorrent.eu/torrent/announce.php",
         "tracker:udp://tracker.opentrackr.org:1337/announce",
         "tracker:udp://open.stealth.si:80/announce"
     ];
@@ -1379,6 +1480,337 @@ if (videoSubory.length === 1) {
         _sortCategory: t.category || "",
         _sortZaner: Array.isArray(t.zanre) ? t.zanre.join(",") : "",
         dubLang: jeSKCZ ? (langMatch.find(function(l) { return /^(CZ|SK)$/i.test(l); }) || '').toLowerCase() : ''
+    };
+
+    return streamObj;
+}
+
+// ===================================================================
+// TreZzoR (Czech-Server) Tracker Integrácia
+// ===================================================================
+async function hladatTrezzor(dotaz, trezzorAxios, userKey = "") {
+    if (!dotaz || dotaz.trim().length < 2 || !trezzorAxios) return [];
+    
+    return withCache(`trezzor_search_${userKey}:${dotaz}`, 600000, async () => {
+        logApi(`Searching TreZzoR for: "${dotaz}"`);
+        let vsetkyVysledky = [];
+        const videnieIds = new Set();
+        
+        try {
+            const res = await trezzorAxios.get(TREZZOR_SEARCH_URL, {
+                params: {
+                    search: dotaz,
+                    active: 1
+                }
+            });
+            
+            const $ = cheerio.load(res.data);
+            $('table tr').each((i, tr) => {
+                const link = $(tr).find('a[href^="details.php"]').first();
+                if (!link.length) return;
+                
+                const href = link.attr("href") || "";
+                if (href.includes("#comments")) return;
+                
+                const dlLink = $(tr).find('a[href^="download.php"]').first();
+                const dlHref = dlLink.attr("href") || "";
+                if (!dlHref) return;
+                
+                const tds = $(tr).find('> td');
+                if (tds.length < 7) return;
+                
+                const nazov = link.text().replace(/\s+/g, " ").trim();
+                const kategoria = $(tds[0]).find("img").attr("alt") || $(tds[0]).text().trim() || "";
+                
+                const katLower = kategoria.toLowerCase();
+                const isExcluded = katLower.includes("hudba") || 
+                                   katLower.includes("program") || 
+                                   katLower.includes("hry") || 
+                                   katLower.includes("knih");
+                if (isExcluded) return;
+                
+                const velkost = $(tds[6]).text().trim();
+                const seeds = parseInt($(tds[7]).text().trim()) || 0;
+                
+                const torrentId = href.split("slug=").pop() || href.split("id=").pop();
+                if (videnieIds.has(torrentId)) return;
+                videnieIds.add(torrentId);
+                
+                vsetkyVysledky.push({
+                    name: nazov,
+                    id: torrentId,
+                    size: velkost || "?",
+                    seeds: seeds,
+                    category: kategoria,
+                    zanre: [],
+                    downloadUrl: `${TREZZOR_BASE_URL}/${dlHref.startsWith('/') ? dlHref.slice(1) : dlHref}`,
+                    detailsUrl: `${TREZZOR_BASE_URL}/${href.startsWith('/') ? href.slice(1) : href}`,
+                    source: "trezzor"
+                });
+            });
+            logSuccess(`Found ${vsetkyVysledky.length} torrents on TreZzoR for "${dotaz}"`);
+        } catch (chyba) {
+            logError(`TreZzoR search failed for "${dotaz}"`, chyba);
+        }
+        
+        return vsetkyVysledky.sort((a, b) => b.seeds - a.seeds);
+    });
+}
+
+async function stiahnutTrezzorTorrent(url, trezzorAxios) {
+    if (!trezzorAxios || !url) return null;
+    return withCache(`trezzor_torrent:${url}`, 86400000, async () => {
+        logApi(`Downloading TreZzoR .torrent file from: ${url}`);
+        try {
+            const res = await trezzorAxios.get(url, { responseType: "arraybuffer" });
+            const bufferString = res.data.toString("utf8", 0, 50);
+            if (bufferString.includes("<html") || bufferString.includes("<!DOC")) {
+                logWarn(`Received HTML instead of .torrent from TreZzoR ${url}`);
+                return null;
+            }
+            
+            const torrent = bencode.decode(res.data);
+            const info = bencode.encode(torrent.info);
+            const infoHash = crypto.createHash("sha1").update(info).digest("hex");
+            let trackers = extractTorrentTrackers(torrent);
+            
+            let subory = [];
+            if (torrent.info.files) {
+                subory = torrent.info.files.map((file, index) => {
+                    const cesta = (file["path.utf-8"] || file.path || []).map(p => p.toString()).join("/");
+                    const length = Number(file.length || 0);
+                    return { path: cesta, index, length };
+                });
+            } else {
+                const nazov = (torrent.info["name.utf-8"] || torrent.info.name || "").toString();
+                const length = Number(torrent.info.length || 0);
+                subory = [{ path: nazov, index: 0, length }];
+            }
+            
+            logSuccess(`TreZzoR parsed .torrent (Hash: ${infoHash}, Files: ${subory.length}, Trackers: ${trackers.length})`);
+            return { infoHash, files: subory, trackers };
+        } catch (e) {
+            logError(`Failed to download/parse TreZzoR .torrent from ${url}`, e);
+            return null;
+        }
+    });
+}
+
+async function vytvoritTrezzorStream(t, seria, epizoda, trezzorAxios, meta, userConfig) {
+    logInfo(`Creating TreZzoR stream for ID: ${t.id} (${t.name})`);
+    
+    const torrentData = await stiahnutTrezzorTorrent(t.downloadUrl, trezzorAxios);
+    if (!torrentData || !torrentData.infoHash) {
+        logWarn(`TreZzoR: nemám infoHash pre torrent ${t.name}, preskakujem.`);
+        return null;
+    }
+    
+    let najdenyIndex = -1;
+    let najdenyNazovSuboru = null;
+    let cistyNazov = t.name.replace(/^Stiahni si\s*/i, "").trim();
+    if (t.category && typeof t.category === "string" && cistyNazov.toLowerCase().startsWith(t.category.trim().toLowerCase())) {
+        cistyNazov = cistyNazov.slice(t.category.length).trim();
+    }
+    
+    if (seria !== undefined && epizoda !== undefined) {
+        const videoSubory = torrentData.files
+            .filter(f => /\.(mp4|mkv|avi|m4v)$/i.test(f.path))
+            .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: "base" }));
+
+        if (videoSubory.length === 0) return null;
+
+        const epCislo = parseInt(epizoda);
+        const epStr = String(epCislo).padStart(2, "0");
+        const seriaStr = String(seria).padStart(2, "0");
+
+        if (videoSubory.length === 1) {
+            const nazovSuboru = videoSubory[0].path;
+            const najdeneESubor =
+                nazovSuboru.match(new RegExp(`S${seriaStr}[._-]?E(\\d{1,3})\\b`, "i")) ||
+                nazovSuboru.match(new RegExp(`\\b${seria}x(\\d{1,3})\\b`, "i")) ||
+                nazovSuboru.match(new RegExp(`Ep(?:isode)?[._\\s]*(\\d{1,3})\\b`, "i")) ||
+                nazovSuboru.match(new RegExp(`\\b(\\d{1,3})[._\\s]*(?:Epiz[oó]da|Diel|Časť|Cast)\\b`, "i")) ||
+                nazovSuboru.match(new RegExp(`\\bE(\\d{1,3})\\b`, "i"));
+
+            if (najdeneESubor && parseInt(najdeneESubor[1]) !== epCislo) return null;
+
+            najdenyIndex = videoSubory[0].index;
+            najdenyNazovSuboru = videoSubory[0].path;
+        } else {
+            const epRegexy = [
+                new RegExp(`[\\\\/](?:\\d+\\.\\s*s[eé]rie[\\\\/])?0*${epCislo}[\\s._-][^\\\\/]*\\.(?:mp4|mkv|avi|m4v)$`, "i"),
+                new RegExp(`\\bS${seriaStr}[._-]?E${epStr}\\b`, "i"),
+                new RegExp(`\\b${seria}x${epStr}\\b`, "i"),
+                new RegExp(`\\b${seriaStr}x${epStr}\\b`, "i"),
+                new RegExp(`\\b${seria}x0*${epCislo}\\b`, "i"),
+                new RegExp(`S${seriaStr}[._-]?E${epStr}(?![0-9])`, "i"),
+                new RegExp(`Ep(?:isode)?[._\\s]*0*${epCislo}\\b`, "i"),
+                new RegExp(`\\b0*${epCislo}[._\\s-]*(?:Epiz[oó]da|Diel|Časť|Cast)\\b`, "i"),
+                new RegExp(`\\bE${epStr}\\b`, "i"),
+                new RegExp(`(?:^|[\\\\/])[\\s._-]*0*${epCislo}[\\s._-].*\\.(?:mp4|mkv|avi|m4v)$`, "i")
+            ];
+
+            for (let i = 0; i < epRegexy.length; i++) {
+                const reg = epRegexy[i];
+                const zhoda = videoSubory.find(f => reg.test(f.path));
+                if (zhoda) {
+                    najdenyIndex = zhoda.index;
+                    najdenyNazovSuboru = zhoda.path;
+                    break;
+                }
+            }
+
+            if (najdenyIndex === -1) {
+                if (videoSubory.length === 1) {
+                    najdenyIndex = videoSubory[0].index;
+                    najdenyNazovSuboru = videoSubory[0].path;
+                } else {
+                    return null;
+                }
+            }
+        }
+    } else {
+        const videoSubory = torrentData.files
+            .filter(f => /\.(mp4|mkv|avi|m4v)$/i.test(f.path))
+            .sort((a, b) => (b.length || 0) - (a.length || 0));
+
+        if (videoSubory.length > 0) {
+            najdenyIndex = videoSubory[0].index;
+            najdenyNazovSuboru = videoSubory[0].path;
+        } else if (torrentData.files.length > 0) {
+            const najvacsiSubor = [...torrentData.files].sort((a, b) => (b.length || 0) - (a.length || 0))[0];
+            najdenyIndex = najvacsiSubor.index;
+            najdenyNazovSuboru = najvacsiSubor.path;
+        }
+    }
+
+    const titleOriginalText = meta?.titleOriginal ? `${meta.titleOriginal}` : "";
+    const titleCzText = meta?.titleCz ? `${meta.titleCz}` : "";
+    const titleLine = titleCzText !== "" && titleOriginalText !== "" ? `${titleCzText} / ${titleOriginalText}` : (titleCzText !== "" ? titleCzText : titleOriginalText);
+
+    let rokText = "📅 N/A";
+    if (meta?.yearStart) {
+        if (seria !== undefined) {
+            rokText = meta.yearEnd && meta.yearStart !== meta.yearEnd ? `📅 ${meta.yearStart}-${meta.yearEnd}` : `📅 ${meta.yearStart}`;
+        } else {
+            rokText = `📅 ${meta.yearStart}`;
+        }
+    }
+
+    const seriaEpizodaText = (seria !== undefined && epizoda !== undefined) ? `📺 Séria ${seria} • Epizóda ${epizoda}` : "";
+
+    const analyzaNazvu = cistyNazov.toLowerCase();
+    const kvality = [];
+    if (analyzaNazvu.includes("2160p") || analyzaNazvu.includes("4k") || analyzaNazvu.includes("uhd")) kvality.push("4K");
+    else if (analyzaNazvu.includes("1080p") || analyzaNazvu.includes("fhd")) kvality.push("1080p");
+    else if (analyzaNazvu.includes("720p") || analyzaNazvu.includes("hd")) kvality.push("720p");
+    else if (analyzaNazvu.includes("480p")) kvality.push("480p");
+
+    if (analyzaNazvu.includes("hdr")) kvality.push("HDR");
+    if (analyzaNazvu.includes("dovi") || analyzaNazvu.includes("vision")) kvality.push("Dolby Vision");
+    if (analyzaNazvu.includes("hevc") || analyzaNazvu.includes("h265") || analyzaNazvu.includes("h.265") || analyzaNazvu.includes("x265")) kvality.push("HEVC");
+    else if (analyzaNazvu.includes("x264") || analyzaNazvu.includes("h264") || analyzaNazvu.includes("h.264") || analyzaNazvu.includes("avc")) kvality.push("H.264");
+    if (analyzaNazvu.includes("atmos")) kvality.push("Atmos");
+    
+    const sourceTypes = [];
+    if (/\bweb[\s.-]?dl\b/i.test(cistyNazov)) sourceTypes.push('webdl');
+    else if (/\bbluray\b|\bbdrip\b|\bbdremux\b/i.test(cistyNazov)) sourceTypes.push('bluray');
+    if (/\bhdtv\b/i.test(cistyNazov)) sourceTypes.push('hdtv');
+    if (/\bdvdrip\b/i.test(cistyNazov)) sourceTypes.push('dvdrip');
+    if (/\bweb[\s.-]?rip\b/i.test(cistyNazov)) sourceTypes.push('webrip');
+    if (/\bhdrip\b/i.test(cistyNazov)) sourceTypes.push('hdrip');
+    if (/\bppv\b/i.test(cistyNazov)) sourceTypes.push('ppv');
+    if (/\b(?:remux|remastered)\b/i.test(cistyNazov)) sourceTypes.push('remux');
+    if (/\b(?:cam|tsrip|tele(?:sync|cine)|kino(?:rip)?)\b/i.test(cistyNazov)) sourceTypes.push('cam');
+    const sourceTag = sourceTypes.length > 0 ? sourceTypes.join(',') : 'neznámy';
+    const kvalitaText = kvality.length > 0 ? `🎥 ${kvality.join(" • ")}` : "🎥 Kvalita neznáma";
+
+    const hdrFeatures = [];
+    if (analyzaNazvu.includes('hdr10')) hdrFeatures.push('hdr10');
+    else if (analyzaNazvu.includes('hdr')) hdrFeatures.push('hdr');
+    if (analyzaNazvu.includes('dovi') || analyzaNazvu.includes('vision')) hdrFeatures.push('dv');
+    if (analyzaNazvu.includes('hevc') || analyzaNazvu.includes('h265') || analyzaNazvu.includes('x265')) hdrFeatures.push('hevc');
+    if (analyzaNazvu.includes('atmos')) hdrFeatures.push('atmos');
+    const hdrTag = hdrFeatures.length > 0 ? hdrFeatures.join(',') : '';
+
+    const fileSize = najdenyIndex !== -1 ? 
+        (torrentData.files.find(f => f.index === najdenyIndex)?.length || 0) : 
+        torrentData.files.reduce((acc, f) => acc + (f.length || 0), 0);
+    const formatFileSize = formatBytes(fileSize);
+    const velkostText = `💿 ${formatFileSize} (🧩 ${t.size})`;
+
+    const langMatch = cistyNazov.match(/\b(CZ|SK|EN)\b/ig) || [];
+    const vlajkyList = langMatch.map(kod => langToFlag[kod.toUpperCase()]).filter(Boolean);
+    let jeSKCZ = langMatch.some(l => /^(CZ|SK)$/i.test(l)) || (t.category && t.category.toLowerCase().includes("cz/sk"));
+    if (vlajkyList.length === 0 && jeSKCZ) vlajkyList.push("🇨🇿", "🇸🇰");
+    const unikatneVlajky = [...new Set(vlajkyList)];
+    let jazykText = unikatneVlajky.length > 0 ? unikatneVlajky.join(" / ") : "Neznámy jazyk";
+
+    const seedersText = t.seeds !== undefined ? `👥 Seeders: ${t.seeds}` : "👥 N/A";
+
+    const riadkyTitle = [];
+    const showConfig = userConfig && userConfig.show;
+    const shouldShow = function(field) {
+        if (!showConfig || !Array.isArray(showConfig) || showConfig.length === 0) return true;
+        return showConfig.indexOf(field) >= 0;
+    };
+
+    if (titleLine) {
+        let rokCisty = rokText.replace("📅 ", "");
+        riadkyTitle.push(`${titleLine} ${rokCisty !== "N/A" ? `(${rokCisty})` : ""}`);
+    }
+    if (seriaEpizodaText) {
+        riadkyTitle.push(seriaEpizodaText);
+    }
+    if (shouldShow('lang') || shouldShow('quality')) {
+        var lp = shouldShow('lang') ? jazykText : '';
+        var qp = shouldShow('quality') ? kvalitaText : '';
+        var sep = lp && qp ? '   |   ' : '';
+        riadkyTitle.push(`🔊 ${lp}${sep}${qp}`);
+    }
+    if (shouldShow('size') || shouldShow('seeds')) {
+        var sp = shouldShow('size') ? velkostText : '';
+        var sdp = shouldShow('seeds') ? seedersText : '';
+        var sep2 = sp && sdp ? '   |   ' : '';
+        riadkyTitle.push(`${sp}${sep2}${sdp}`);
+    }
+    if (najdenyNazovSuboru) {
+        const ibaNazovSuboru = najdenyNazovSuboru.split('/').pop().split('\\').pop();
+        riadkyTitle.push(`📄 Súbor: ${ibaNazovSuboru}`);
+    }
+    riadkyTitle.push(`🗂️ TreZzoR: ${cistyNazov}`);
+
+    const bezpecnaVelkost = (fileSize && fileSize > 0) ? fileSize : 1048576;
+    const povodnySubor = najdenyNazovSuboru || "video.mkv";
+    let cistyNazovSuboru = povodnySubor.split('/').pop().split('\\').pop();
+    const sortText = `${t.category || ""} ${riadkyTitle.join(" ")}`;
+
+    let streamObj = {
+        name: `TRZ 👥\n${(t.category || "HD").toUpperCase()}`,
+        title: riadkyTitle.join("\n"),
+        behaviorHints: { 
+            bingeGroup: `trezzor-${kvality.length > 0 ? kvality.join("-").replace(/\s/g, "") : "standard"}`
+        },
+        trezzorId: t.id,
+        fileName: cistyNazovSuboru,
+        infoHash: torrentData.infoHash,
+        fileIdx: najdenyIndex === -1 ? 0 : najdenyIndex,
+        sources: (torrentData.trackers && torrentData.trackers.length > 0) ? torrentData.trackers : undefined,
+        isDub: jeSKCZ,
+        seeds: t.seeds,
+        _sortHdr: hdrTag,
+        _sortSource: sourceTag,
+        _sortRdBlocked: 0,
+        _sortName: cistyNazov,
+        _sortCategory: t.category || "",
+        _sortZaner: "",
+        _sortQuality: getQualityRank(sortText),
+        _sortSize: bezpecnaVelkost,
+        _sortSeeds: t.seeds || 0,
+        _sortCached: 0,
+        _sortDub: jeSKCZ ? 1 : 0,
+        _sortDubLang: jeSKCZ ? (langMatch.find(function(l) { return /^(CZ|SK)$/i.test(l); }) || 'cz').toLowerCase() : '',
+        _isTrezzor: true
     };
 
     return streamObj;
@@ -1536,6 +1968,54 @@ app.post('/api/sktorrent-login', asyncRoute(async (req, res) => {
         res.status(500).json({ error: 'Chyba pri prihlasovaní k SKTorrent' });
     }
 }));
+
+app.post('/api/trezzor-login', asyncRoute(async (req, res) => {
+    if (skontrolujLoginRateLimit(req.ip || "unknown")) {
+        return res.status(429).json({ error: 'Príliš veľa pokusov o prihlásenie, skús to neskôr.' });
+    }
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: 'Chýba meno alebo heslo' });
+    }
+    try {
+        const loginRes = await axios({
+            method: 'post',
+            url: 'https://tracker.czech-server.com/prihlasenie.php',
+            data: `uid=${encodeURIComponent(username)}&pwd=${encodeURIComponent(password)}`,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+                'Origin': 'https://tracker.czech-server.com',
+                'Referer': 'https://tracker.czech-server.com/prihlasenie.php'
+            },
+            maxRedirects: 0,
+            validateStatus: status => status >= 200 && status < 400
+        });
+
+        const setCookie = loginRes.headers['set-cookie'];
+        if (!setCookie || !Array.isArray(setCookie) || setCookie.length === 0) {
+            return res.status(401).json({ error: 'Nesprávne meno alebo heslo na TreZzoR' });
+        }
+
+        let uid = '', pass = '', secure2 = '';
+        for (const cookie of setCookie) {
+            if (cookie.startsWith('uid=')) uid = cookie.split(';')[0].substring(4);
+            if (cookie.startsWith('pass=')) pass = cookie.split(';')[0].substring(5);
+            if (cookie.startsWith('secure2=')) secure2 = cookie.split(';')[0].substring(8);
+        }
+
+        if (!uid || !pass) {
+            return res.status(401).json({ error: 'Nesprávne meno alebo heslo na TreZzoR' });
+        }
+
+        logSuccess(`TreZzoR login OK: ${username} (UID: ${uid})`);
+        res.json({ uid, pass, secure2, username });
+    } catch (error) {
+        logError('TreZzoR login proxy error', error);
+        res.status(500).json({ error: 'Chyba pri prihlasovaní k TreZzoR (over Cloudflare ochranu)' });
+    }
+}));
+
 app.get('/', (req, res) => {
     res.redirect(302, '/configure');
 });
@@ -1720,6 +2200,52 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 </div>
                 </div>
                 </div>
+
+                <!-- TreZzoR Tracker (czech-server.com) -->
+                <div id="trezzorSection" style="display:block;padding-left:16px;border-left:2px solid #76B83E;margin:12px 20px 8px;">
+                    <div style="margin-bottom:8px;">
+                        <label class="checkbox-row" style="padding:0;cursor:pointer;">
+                            <input type="checkbox" id="trezzorEnabled" ${currentConfig.trezzor_enabled !== false ? 'checked' : ''} onchange="toggleTrezzorFields()">
+                            <span class="label-text" style="font-weight:600;color:#76B83E;">⚡ TreZzoR Tracker (czech-server.com)</span>
+                        </label>
+                        <div style="font-size:11px;color:#888;margin-top:2px;">🛡️ TreZzoR beží výhradne cez bezpečný priamy P2P režim (žiadny ban za zdieľanie passkey)</div>
+                    </div>
+
+                    <div id="trezzorFieldsBlock" style="display:${currentConfig.trezzor_enabled !== false ? 'block' : 'none'};">
+                        <div class="field" id="trezzorLoginFields" style="padding:4px 0 8px;">
+                            <label>🔑 <span>Prihlásiť sa na TreZzoR</span> <span style="color:#666;font-weight:400;">(alebo zadaj ručne)</span></label>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <input type="text" id="trezzorUser" placeholder="Používateľské meno" style="flex:1;min-width:120px;">
+                                <input type="password" id="trezzorPassInput" placeholder="Heslo" style="flex:1;min-width:120px;">
+                            </div>
+                            <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
+                                <button type="button" id="trezzorLoginBtn" onclick="loginToTrezzor()" style="padding:8px 16px;background:linear-gradient(135deg,#76B83E,#5A9A2E);color:white;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">Prihlásiť sa</button>
+                                <a href="https://tracker.czech-server.com/prihlasenie.php" target="_blank" rel="noopener" style="padding:8px 16px;background:#333;color:#999;border:none;border-radius:8px;font-size:13px;font-weight:400;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;">Web TreZzoR</a>
+                            </div>
+                            <div id="trezzorLoginStatus" style="font-size:12px;margin-top:6px;"></div>
+                        </div>
+
+                        <div style="padding:0 0 8px;">
+                            <a href="#" onclick="toggleTrezzorManual(event)" style="font-size:12px;color:#666;text-decoration:none;">▶ Manuálne zadať TreZzoR cookies (UID, PASS, SECURE2)</a>
+                        </div>
+                        <div id="trezzorManualFields" style="display:${currentConfig.trezzor_uid ? 'block' : 'none'};">
+                            <div class="field" style="padding:4px 0;">
+                                <label>TreZzoR UID</label>
+                                <input type="text" id="trezzorUid" placeholder="Napr. 9249" value="${getVal('trezzor_uid')}">
+                            </div>
+                            <div class="field" style="padding:4px 0;">
+                                <label>TreZzoR pass (cookie)</label>
+                                <input type="password" id="trezzorPass" placeholder="Hash z cookie pass" value="${getVal('trezzor_pass')}">
+                            </div>
+                            <div class="field" style="padding:4px 0;">
+                                <label>TreZzoR secure2 (cookie)</label>
+                                <input type="password" id="trezzorSecure2" placeholder="Hodnota z cookie secure2" value="${getVal('trezzor_secure2')}">
+                                <div style="font-size:11px;color:#666;margin-top:2px;">ℹ️ Nájdeš v cookies prehliadača po prihlásení na tracker.czech-server.com</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="field" id="torboxField" style="display:${currentConfig.debridProvider === 'torbox' || (!currentConfig.debridProvider && currentConfig.torbox) ? '' : 'none'};">
                     <label data-i18n="label.torbox">TorBox API kľúč</label>
                     <input type="text" id="torbox" data-i18n-placeholder="torbox.placeholder" placeholder="TorBox token" value="${getVal('torbox')}">
@@ -2453,6 +2979,10 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     realdebrid: document.getElementById('realdebrid').value,
                     tmdb: document.getElementById('tmdb').value,
                     tvdb: document.getElementById('tvdb').value,
+                    trezzor_enabled: document.getElementById('trezzorEnabled') ? document.getElementById('trezzorEnabled').checked : false,
+                    trezzor_uid: document.getElementById('trezzorUid') ? document.getElementById('trezzorUid').value.trim() : '',
+                    trezzor_pass: document.getElementById('trezzorPass') ? document.getElementById('trezzorPass').value.trim() : '',
+                    trezzor_secure2: document.getElementById('trezzorSecure2') ? document.getElementById('trezzorSecure2').value.trim() : '',
                     catalogs: catInfo.active,
                     catOrder: catInfo.all,
                     kidsAge: document.getElementById('kidsAge') ? document.getElementById('kidsAge').value : '12',
@@ -2472,7 +3002,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     cb: Date.now()
                 };
 
-                if ((!config.uid || !config.pass) && (!debridProvider || debridProvider === 'p2p')) {
+                if ((!config.uid || !config.pass) && (!config.trezzor_uid || !config.trezzor_pass) && (!debridProvider || debridProvider === 'p2p')) {
                     alert(t('alert.fillUidPass'));
                     return;
                 }
@@ -2637,7 +3167,72 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                 });
             }
 
-            // Initialise catalog order
+            function toggleTrezzorFields() {
+                var chk = document.getElementById('trezzorEnabled');
+                var blk = document.getElementById('trezzorFieldsBlock');
+                if (blk) blk.style.display = chk && chk.checked ? 'block' : 'none';
+            }
+
+            function toggleTrezzorManual(e) {
+                if (e) e.preventDefault();
+                var el = document.getElementById('trezzorManualFields');
+                var link = e ? e.target : null;
+                if (!el) return;
+                if (el.style.display === 'none') {
+                    el.style.display = 'block';
+                    if (link) link.innerHTML = '▼ Skryť manuálne TreZzoR polia';
+                } else {
+                    el.style.display = 'none';
+                    if (link) link.innerHTML = '▶ Manuálne zadať TreZzoR cookies (UID, PASS, SECURE2)';
+                }
+            }
+
+            function loginToTrezzor() {
+                var username = document.getElementById('trezzorUser').value.trim();
+                var password = document.getElementById('trezzorPassInput').value;
+                var statusEl = document.getElementById('trezzorLoginStatus');
+                var btn = document.getElementById('trezzorLoginBtn');
+
+                if (!username || !password) {
+                    statusEl.innerHTML = '<span style="color:#ff6b6b;">❌ Vyplň meno aj heslo pre TreZzoR</span>';
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.style.opacity = '0.6';
+                btn.textContent = 'Prihlasujem...';
+                statusEl.innerHTML = '<span style="color:#888;">⏳ Prihlasujem na TreZzoR...</span>';
+
+                fetch('/api/trezzor-login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: username, password: password })
+                })
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        statusEl.innerHTML = '<span style="color:#ff6b6b;">❌ ' + data.error + '</span><br><span style="font-size:11px;color:#aaa;">Ak ťa blokuje ochrana, použi "Manuálne zadať TreZzoR cookies".</span>';
+                        btn.disabled = false;
+                        btn.style.opacity = '1';
+                        btn.textContent = 'Prihlásiť sa';
+                        return;
+                    }
+                    document.getElementById('trezzorUid').value = data.uid;
+                    document.getElementById('trezzorPass').value = data.pass;
+                    if (data.secure2) document.getElementById('trezzorSecure2').value = data.secure2;
+                    document.getElementById('trezzorManualFields').style.display = 'block';
+                    document.getElementById('trezzorLoginFields').style.display = 'none';
+                    statusEl.innerHTML = '<span style="color:#4caf50;">✅ Prihlásený na TreZzoR ako <strong>' + data.username + '</strong><br><span style="font-size:11px;color:#888;">UID: ' + data.uid + '</span></span>';
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                })
+                .catch(function(err) {
+                    statusEl.innerHTML = '<span style="color:#ff6b6b;">❌ Chyba spojenia so serverom</span>';
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                    btn.textContent = 'Prihlásiť sa';
+                });
+            }
             var savedCatOrder = ${(() => {
                 const co = currentConfig.catOrder;
                 if (co && Array.isArray(co)) return JSON.stringify(co);
@@ -3122,9 +3717,9 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.6.0",
+        version: "2.7.0",
         name: "TorrentSK",
-        description: "SKTorrent s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
+        description: "SKTorrent & TreZzoR s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
         icon: `${PUBLIC_URL}/logo.png`,
         types: Array.from(typesSet),
@@ -3495,12 +4090,36 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
     }
 
     const execLimit = pLimit(5);
-    logInfo(`Creating streams for ${torrenty.length} torrents (Max concurrency: 5)...`);
-    
-    // POSIELAME `metaInfo` do `vytvoritStream`
-    let streamy = (await Promise.all(
-        torrenty.map(t => execLimit(() => vytvoritStream(t, seria, epizoda, userAxios, metaInfo, userConfig)))
-    )).filter(Boolean);
+    logInfo(`Creating streams for ${torrenty.length} SKTorrent torrents (Max concurrency: 5)...`);
+
+    // ── TreZzoR hľadanie a tvorba streamov (paralelne s SKTorrent) ──
+    const trezzorAxios = getTrezzorAxios(userConfig);
+    const trezzorPromise = (async () => {
+        if (!trezzorAxios) return [];
+        try {
+            const trezzorUserKey = crypto.createHash("sha1").update(String(userConfig.trezzor_uid || "")).digest("hex").slice(0, 8);
+            const trezzorQuery = odstranDiakritiku(unikatneNazvy[0] || "").trim();
+            if (!trezzorQuery) return [];
+            logInfo(`TreZzoR search starting for: "${trezzorQuery}"`);
+            let trzTorrents = await hladatTrezzor(trezzorQuery, trezzorAxios, trezzorUserKey);
+            if (seria !== undefined) {
+                trzTorrents = trzTorrents.filter(t => torrentSedisSeriou(t.name, seria) && torrentSediSEpizodou(t.name, seria, epizoda));
+            }
+            if (trzTorrents.length === 0) return [];
+            logInfo(`Creating TreZzoR streams for ${trzTorrents.length} torrents...`);
+            return (await Promise.all(
+                trzTorrents.slice(0, 8).map(t => execLimit(() => vytvoritTrezzorStream(t, seria, epizoda, trezzorAxios, metaInfo, userConfig)))
+            )).filter(Boolean);
+        } catch (err) {
+            logError("TreZzoR stream search failed", err);
+            return [];
+        }
+    })();
+
+    let [streamy, trezzorStreamy] = await Promise.all([
+        Promise.all(torrenty.map(t => execLimit(() => vytvoritStream(t, seria, epizoda, userAxios, metaInfo, userConfig)))).then(res => res.filter(Boolean)),
+        trezzorPromise
+    ]);
 
         // ── DEBRID REŽIM (TorBox / Real-Debrid) ──
         const debridProvider = userConfig.debridProvider || (userConfig.torbox ? 'torbox' : '');
@@ -3607,6 +4226,12 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
                     _sortSeeds: seeds
                 };
             });
+        }
+
+        // ── Zlúčenie TreZzoR P2P streamov (bezpečné P2P pre ochranu pred banom) ──
+        if (Array.isArray(trezzorStreamy) && trezzorStreamy.length > 0) {
+            logInfo(`Adding ${trezzorStreamy.length} TreZzoR P2P streams to results.`);
+            streamy = [...streamy, ...trezzorStreamy];
         }
 
         // ── Ak nie sú žiadne streamy ──
@@ -3848,7 +4473,8 @@ async function handleTorboxPlay(req, res, hash, seria, epizoda, decodedFileName,
 
         if (!torrentId) {
             const formData = new FormData();
-            formData.append("magnet", `magnet:?xt=urn:btih:${hash}`);
+            const magnetWithTrackers = `magnet:?xt=urn:btih:${hash}&tr=${encodeURIComponent('https://sktorrent.eu/torrent/announce.php')}&tr=${encodeURIComponent('udp://tracker.opentrackr.org:1337/announce')}&tr=${encodeURIComponent('udp://open.stealth.si:80/announce')}`;
+            formData.append("magnet", magnetWithTrackers);
             formData.append("seed_instantly", "true");
 
             const addRes = await axios.post("https://api.torbox.app/v1/api/torrents/createtorrent", formData, {
@@ -4098,7 +4724,8 @@ app.get("/:config/download/:hash/:sktId", asyncRoute(async (req, res) => {
             formData.append("seed_instantly", "true");
             formData.append("allow_zip", "false");
             formData.append("seed", "2");
-            formData.append("magnet", `magnet:?xt=urn:btih:${hash}`);
+            const magnetWithTrackers = `magnet:?xt=urn:btih:${hash}&tr=${encodeURIComponent('https://sktorrent.eu/torrent/announce.php')}&tr=${encodeURIComponent('udp://tracker.opentrackr.org:1337/announce')}&tr=${encodeURIComponent('udp://open.stealth.si:80/announce')}`;
+            formData.append("magnet", magnetWithTrackers);
 
             const createRes = await axios.post("https://api.torbox.app/v1/api/torrents/createtorrent", formData, {
                 headers: { "Authorization": `Bearer ${debridApiKey}`, ...formData.getHeaders() },
