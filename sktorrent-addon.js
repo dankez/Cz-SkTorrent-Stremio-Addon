@@ -1785,17 +1785,19 @@ async function vytvoritTrezzorStream(t, seria, epizoda, trezzorAxios, meta, user
     let cistyNazovSuboru = povodnySubor.split('/').pop().split('\\').pop();
     const sortText = `${t.category || ""} ${riadkyTitle.join(" ")}`;
 
+    const rpiHost = (userConfig && (userConfig.trezzor_rpi_ip || userConfig.rpi_ip)) || "192.168.0.47";
+    const useRpi = rpiHost && rpiHost !== "none" && rpiHost !== "false";
+    const playUrl = `http://${rpiHost}:7777/play?url=${encodeURIComponent(t.downloadUrl)}&uid=${encodeURIComponent(userConfig?.trezzor_uid || "")}&pass=${encodeURIComponent(userConfig?.trezzor_pass || "")}&sec=${encodeURIComponent(userConfig?.trezzor_secure2 || "")}&idx=${najdenyIndex === -1 ? 0 : najdenyIndex}&file=${encodeURIComponent(cistyNazovSuboru)}`;
+
     let streamObj = {
         name: `TRZ 👥\n${(t.category || "HD").toUpperCase()}`,
         title: riadkyTitle.join("\n"),
         behaviorHints: { 
+            notWebReady: false,
             bingeGroup: `trezzor-${kvality.length > 0 ? kvality.join("-").replace(/\s/g, "") : "standard"}`
         },
         trezzorId: t.id,
         fileName: cistyNazovSuboru,
-        infoHash: torrentData.infoHash,
-        fileIdx: najdenyIndex === -1 ? 0 : najdenyIndex,
-        sources: (torrentData.trackers && torrentData.trackers.length > 0) ? torrentData.trackers : undefined,
         isDub: jeSKCZ,
         seeds: t.seeds,
         _sortHdr: hdrTag,
@@ -1812,6 +1814,16 @@ async function vytvoritTrezzorStream(t, seria, epizoda, trezzorAxios, meta, user
         _sortDubLang: jeSKCZ ? (langMatch.find(function(l) { return /^(CZ|SK)$/i.test(l); }) || 'cz').toLowerCase() : '',
         _isTrezzor: true
     };
+
+    if (useRpi) {
+        streamObj.url = playUrl;
+    } else {
+        streamObj.infoHash = torrentData.infoHash;
+        streamObj.fileIdx = najdenyIndex === -1 ? 0 : najdenyIndex;
+        if (torrentData.trackers && torrentData.trackers.length > 0) {
+            streamObj.sources = torrentData.trackers;
+        }
+    }
 
     return streamObj;
 }
@@ -2241,6 +2253,11 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                                 <label>TreZzoR secure2 (cookie)</label>
                                 <input type="password" id="trezzorSecure2" placeholder="Hodnota z cookie secure2" value="${getVal('trezzor_secure2')}">
                                 <div style="font-size:11px;color:#666;margin-top:2px;">ℹ️ Nájdeš v cookies prehliadača po prihlásení na tracker.czech-server.com</div>
+                            </div>
+                            <div class="field" style="padding:4px 0;">
+                                <label>Raspberry Pi Mostík (IP pre Android TV)</label>
+                                <input type="text" id="trezzorRpiIp" placeholder="192.168.0.47" value="${getVal('trezzor_rpi_ip') || '192.168.0.47'}">
+                                <div style="font-size:11px;color:#666;margin-top:2px;">ℹ️ Lokálna IP tvojho Raspberry Pi s bežiacim mostíkom (predvolené: 192.168.0.47)</div>
                             </div>
                         </div>
                     </div>
@@ -2983,6 +3000,7 @@ app.get(['/configure', '/:config/configure'], (req, res) => {
                     trezzor_uid: document.getElementById('trezzorUid') ? document.getElementById('trezzorUid').value.trim() : '',
                     trezzor_pass: document.getElementById('trezzorPass') ? document.getElementById('trezzorPass').value.trim() : '',
                     trezzor_secure2: document.getElementById('trezzorSecure2') ? document.getElementById('trezzorSecure2').value.trim() : '',
+                    trezzor_rpi_ip: document.getElementById('trezzorRpiIp') ? document.getElementById('trezzorRpiIp').value.trim() : '192.168.0.47',
                     catalogs: catInfo.active,
                     catOrder: catInfo.all,
                     kidsAge: document.getElementById('kidsAge') ? document.getElementById('kidsAge').value : '12',
@@ -3717,7 +3735,7 @@ const handleManifest = (req, res) => {
 
     res.json({
         id: "org.stremio.sktorrent.addon", 
-        version: "2.7.0",
+        version: "2.8.0",
         name: "TorrentSK",
         description: "SKTorrent & TreZzoR s TorBox / Real-Debrid prehrávaním, ČSFD a katalógmi",
         logo: `${PUBLIC_URL}/logo.png`,
