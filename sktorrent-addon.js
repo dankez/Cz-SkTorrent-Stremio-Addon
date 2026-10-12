@@ -168,6 +168,24 @@ function getFastAxios(userConfig) {
     });
 }
 
+// GET s jedným opakovaním pri sieťových chybách/5xx (tracker občas zhodí spojenie)
+async function getWithRetry(client, url, options = {}, retries = 1) {
+    let lastErr;
+    for (let i = 0; i <= retries; i++) {
+        try {
+            return await client.get(url, options);
+        } catch (e) {
+            lastErr = e;
+            const status = e?.response?.status;
+            if (status && status < 500) break;
+            if (i < retries) await new Promise(r => setTimeout(r, 400));
+        }
+    }
+    throw lastErr;
+}
+
+const jeHexHash = (v) => typeof v === "string" && /^[a-f0-9]{40}$/i.test(v);
+
 const langToFlag = { CZ: "🇨🇿", SK: "🇸🇰", EN: "🇬🇧", US: "🇺🇸", DE: "🇩🇪", FR: "🇫🇷", IT: "🇮🇹", ES: "🇪🇸", RU: "🇷🇺", PL: "🇵🇱", HU: "🇭🇺", JP: "🇯🇵" };
 
 function odstranDiakritiku(str) { return str.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
@@ -981,7 +999,7 @@ async function hladatTorrenty(dotaz, userAxios, maxPages = 1, userKey = "") {
         for (let page = 0; page < skutocneMaxPages; page++) {
             try {
                 logInfo(`Fetching page ${page} for query: ${dotaz}`);
-                const res = await userAxios.get(SEARCH_URL, { 
+                const res = await getWithRetry(userAxios, SEARCH_URL, { 
                     params: { 
                         search: dotaz, 
                         category: 0,
@@ -1023,11 +1041,19 @@ async function hladatTorrenty(dotaz, userAxios, maxPages = 1, userKey = "") {
                         !kategoria.toLowerCase().includes("dokum") && !kategoria.toLowerCase().includes("tv") &&
                         !kategoria.toLowerCase().includes("sport") && !kategoria.toLowerCase().includes("šport")) return;
 
+                    // Freeleech značka (best-effort): obrázok/odkaz s "free" v alt/title/src alebo text FREE
+                    const freeleech = bunka.find("img, a, span, b").toArray().some(el => {
+                        const $e = $(el);
+                        return /free(?:\s*-?\s*leech)?/i.test(`${$e.attr("alt") || ""} ${$e.attr("title") || ""} ${$e.attr("src") || ""}`);
+                    }) || /\bfree\s*-?\s*leech\b/i.test(text);
+
                     videnieIds.add(torrentId);
                     vsetkyVysledky.push({
                         name: nazov, id: torrentId,
                         size: velkostMatch ? velkostMatch[1].trim() : "?",
                         seeds: seedMatch ? parseInt(seedMatch[1]) : 0,
+                        seedsKnown: !!seedMatch,
+                        freeleech,
                         category: kategoria,
                         zanre: zanre,
                         downloadUrl: `${BASE_URL}/torrent/download.php?id=${torrentId}`
@@ -1132,24 +1158,79 @@ async function ziskatSuboryZDetails(torrentId, userAxios) {
     });
 }
 
+// torrentId → dôvod, prečo tracker nevydal .torrent (ratio / login / other)
+const blokovaneTorrenty = new Map();
+const BLOKOVANY_TEXT = {
+    ratio: "⛔ Ratio limit – tracker nepustil torrent",
+    login: "⛔ Tracker vyžaduje prihlásenie – skontroluj UID/PASS v konfigurácii",
+    other: "⛔ Tracker nevydal .torrent súbor"
+};
+
+const VEREJNE_TRACKERY = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://exodus.desync.com:6969/announce"
+];
+
+// Záložné zdroje z verejného indexera (apibay) — použijú sa, keď SKTorrent torrent nepustí
+async function hladatVerejneZdroje(imdbId, nazov, seria, epizoda) {
+    const jeSerial = seria !== undefined && epizoda !== undefined;
+    let dotaz = imdbId;
+    if (jeSerial) {
+        if (!nazov) return [];
+        dotaz = `${nazov} S${String(seria).padStart(2, "0")}E${String(epizoda).padStart(2, "0")}`;
+    }
+    const vysledok = await withCache(`public:${dotaz}`, 600000, async () => {
+        const res = await getWithRetry(axios, "https://apibay.org/q.php", {
+            params: { q: dotaz, cat: 200 }, timeout: 8000
+        });
+        return Array.isArray(res.data) ? res.data : [];
+    });
+    if (!Array.isArray(vysledok)) return [];
+
+    return vysledok
+        .filter(r => jeHexHash((r.info_hash || "").toLowerCase()) && !/^0+$/.test(r.info_hash))
+        .filter(r => parseInt(r.seeders, 10) > 0)
+        .filter(r => jeSerial
+            ? torrentSedisSeriou(r.name, seria) && torrentSediSEpizodou(r.name, seria, epizoda)
+            : (!r.imdb || r.imdb === imdbId))
+        .sort((a, b) => parseInt(b.seeders, 10) - parseInt(a.seeders, 10))
+        .slice(0, 5)
+        .map(r => {
+            const seeds = parseInt(r.seeders, 10) || 0;
+            const velkost = formatBytes(parseInt(r.size, 10) || 0);
+            return {
+                name: "🌐 Verejný\nZáloha",
+                title: `${r.name}\n💿 ${velkost} | 👥 Seeders: ${seeds}`,
+                infoHash: r.info_hash.toLowerCase(),
+                sources: VEREJNE_TRACKERY.map(tr => `tracker:${tr}`),
+                behaviorHints: { bingeGroup: "public-fallback", filename: r.name }
+            };
+        });
+}
+
 async function stiahnutTorrentData(url, userAxios) {
     return withCache(`torrent:${url}`, 86400000, async () => { 
         logApi(`Downloading .torrent file from: ${url}`);
         const torrentId = url.split("id=").pop().split("&")[0];
         try {
-            const res = await userAxios.get(url, { responseType: "arraybuffer" });
+            const res = await getWithRetry(userAxios, url, { responseType: "arraybuffer" });
             const bufferString = res.data.toString("utf8", 0, 50);
             if (bufferString.includes("<html") || bufferString.includes("<!DOC")) {
-                logWarn(`Received HTML instead of .torrent file from ${url} (pravdepodobne ratio limit alebo login)`);
-                if (torrentId) {
+                const telo = res.data.toString("utf8", 0, 20000);
+                const dovod = /ratio/i.test(telo) ? "ratio"
+                    : /(prihl[aá]s|login|heslo|password)/i.test(telo) ? "login" : "other";
+                logWarn(`Received HTML instead of .torrent file from ${url} (dôvod: ${dovod})`);
+                blokovaneTorrenty.set(String(torrentId), { dovod, cas: Date.now() });
+                if (jeHexHash(torrentId)) {
                     const fallbackData = await ziskatSuboryZDetails(torrentId, userAxios);
-                    if (fallbackData) {
-                        logSuccess(`Získané metadáta z details.php pre ${torrentId} (Fallback pri ratio limite)`);
-                        return fallbackData;
-                    }
+                    if (fallbackData) return fallbackData;
                 }
                 return null;
             }
+            blokovaneTorrenty.delete(String(torrentId));
 
             const torrent = bencode.decode(res.data);
             const info = bencode.encode(torrent.info);
@@ -1196,8 +1277,20 @@ async function vytvoritStream(t, seria, epizoda, userAxios, meta, userConfig) {
     
     let torrentData = null;
     torrentData = await stiahnutTorrentData(t.downloadUrl, userAxios);
+    // P2P: Stremio potrebuje platný 40-znakový infoHash, číselné SKT ID nikdy neprehrá
+    const blok = blokovaneTorrenty.get(String(t.id));
+    if (!maDebrid && blok && !jeHexHash(t.id)) {
+        const cistyN = t.name.replace(/^Stiahni si\s*/i, "").trim();
+        return {
+            _blocked: true,
+            name: `SKT ⛔\n${(t.category || "").toUpperCase()}`.trim(),
+            title: `${BLOKOVANY_TEXT[blok.dovod] || BLOKOVANY_TEXT.other}\n🗂️ ${cistyN}\n💿 ${t.size}${t.freeleech ? " | 🆓 FREELEECH" : ""}`,
+            externalUrl: `${BASE_URL}/torrent/details.php?id=${t.id}`
+        };
+    }
+    if (!maDebrid && torrentData && !jeHexHash(torrentData.infoHash)) return null;
     if (!torrentData) {
-        const isHexHash = typeof t.id === "string" && /^[a-f0-9]{40}$/i.test(t.id);
+        const isHexHash = jeHexHash(t.id);
         if (!isHexHash && !maDebrid) return null;
         if (isHexHash) {
             logInfo(`Torrent .torrent nedostupny, pouzivam priamy infoHash ${t.id}`);
@@ -1368,7 +1461,7 @@ if (videoSubory.length === 1) {
     }
 
     // Získanie počtu seedov (t.seeds je dostupné z tvojho vyhľadávacieho scrapera)
-    const seedersText = t.seeds !== undefined ? `👥 Seeders: ${t.seeds}` : "👥 N/A";
+    const seedersText = (t.seeds !== undefined ? `👥 Seeders: ${t.seeds}` : "👥 N/A") + (t.freeleech ? " | 🆓 FREELEECH" : "");
 
     // Vytvorenie lepšie usporiadaného zoznamu
     const riadkyTitle = [];
@@ -1442,9 +1535,12 @@ if (videoSubory.length === 1) {
         name: `SKT\n${(t.category || "SPORT").toUpperCase()}`,
         title: riadkyTitle.join("\n"),
         behaviorHints: { 
-            bingeGroup: `sktorrent-${kvality.length > 0 ? kvality.join("-").replace(/\s/g, "") : "standard"}`
+            bingeGroup: `sktorrent-${kvality.length > 0 ? kvality.join("-").replace(/\s/g, "") : "standard"}`,
+            filename: cistyNazovSuboru,
+            ...(torrentData && fileSize > 0 ? { videoSize: Math.round(fileSize) } : {})
         },
         sktId: t.id,
+        seedsKnown: t.seedsKnown !== false,
         fileName: cistyNazovSuboru,
         infoHash: torrentData ? torrentData.infoHash : t.id,
         fileIdx: najdenyIndex === -1 ? 0 : najdenyIndex,
@@ -3577,9 +3673,19 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
     const execLimit = pLimit(5);
     logInfo(`Creating streams for ${torrenty.length} SKTorrent torrents (Max concurrency: 5)...`);
 
-    let streamy = (await Promise.all(
-        torrenty.map(t => execLimit(() => vytvoritStream(t, seria, epizoda, userAxios, metaInfo, userConfig)))
-    )).filter(Boolean);
+    // Celkový limit: Stremio čaká obmedzený čas, preto vrátime to, čo je hotové
+    const DEADLINE_MS = 18000;
+    const hotove = [];
+    const ulohy = torrenty.map(t => execLimit(() => vytvoritStream(t, seria, epizoda, userAxios, metaInfo, userConfig))
+        .then(s => { if (s) hotove.push(s); }, () => {}));
+    await Promise.race([
+        Promise.all(ulohy),
+        new Promise(r => setTimeout(r, Math.max(1000, DEADLINE_MS - (Date.now() - startCas))))
+    ]);
+    let streamy = hotove.slice();
+    const blokovaneStreamy = streamy.filter(s => s._blocked).slice(0, 3)
+        .map(({ _blocked, ...rest }) => rest);
+    streamy = streamy.filter(s => !s._blocked);
 
         // ── DEBRID REŽIM (TorBox / Real-Debrid) ──
         const debridProvider = userConfig.debridProvider || (userConfig.torbox ? 'torbox' : '');
@@ -3655,6 +3761,9 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
         // ── P2P REŽIM (bez debridu) ──
         if ((!debridProvider || !debridApiKey) && streamy.length > 0) {
             logInfo("TorBox not configured. Using P2P mode (WebTorrent).");
+            // Torrenty bez seederov sa nikdy nerozbehnú — skryjeme ich, ak existujú živé
+            const zive = streamy.filter(s => !(s.seedsKnown && (s.seeds || 0) === 0));
+            if (zive.length > 0) streamy = zive;
             streamy = streamy.map(stream => {
                 const staraKategoria = stream.name.split("\n")[1] || "";
                 const sortText = `${staraKategoria} ${stream.title || ""}`;
@@ -3689,8 +3798,22 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
         }
 
         // ── Ak nie sú žiadne streamy ──
-        if (streamy.length === 0) {
-            logInfo("No streams found. Returning empty list.");
+        // ── ZÁLOHY + INFO O BLOKOVANÝCH ZDROJOCH (len P2P režim) ──
+        const extraStreamy = [];
+        if (!debridProvider || !debridApiKey) {
+            extraStreamy.push(...blokovaneStreamy);
+            if ((blokovaneStreamy.length > 0 || streamy.length === 0) && /^tt\d+$/.test(rawId)) {
+                try {
+                    const verejne = await hladatVerejneZdroje(rawId, metaInfo?.titleOriginal, seria, epizoda);
+                    const znameHashe = new Set(streamy.map(s => (s.infoHash || "").toLowerCase()));
+                    extraStreamy.push(...verejne.filter(s => !znameHashe.has(s.infoHash)));
+                } catch (e) {
+                    logError("Verejné záložné zdroje zlyhali", e);
+                }
+            }
+        }
+
+        if (streamy.length === 0 && extraStreamy.length === 0) {
             return res.json({ streams: [] });
         }
 
@@ -3766,7 +3889,8 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
         const userLangs = userConfig.lang;
 
         // ── RADENIE (podľa používateľského sort order) ──
-        const sortOrder = userConfig.sort;
+        const sortOrder = (userConfig.sort && userConfig.sort.length) ? userConfig.sort
+            : (debridProvider && debridApiKey ? ['cached', 'seeds', 'quality', 'size'] : ['seeds', 'quality', 'size']);
         if (sortOrder && Array.isArray(sortOrder) && sortOrder.length > 0) {
             streamy.sort((a, b) => {
                 for (let i = 0; i < sortOrder.length; i++) {
@@ -3860,6 +3984,8 @@ app.get('/:config/stream/:type/:id.json', asyncRoute(async (req, res) => {
         if (maxResultsVal > 0 && streamy.length > maxResultsVal) {
             streamy = streamy.slice(0, maxResultsVal);
         }
+
+        streamy = streamy.concat(extraStreamy);
 
         const trvanie = Date.now() - startCas;
         logSuccess(`Stream request finished in ${trvanie}ms. Returning ${streamy.length} streams to Stremio.`);
